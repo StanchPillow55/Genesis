@@ -2,13 +2,9 @@
 
 Agents shouldn't stop because they think they're done. They should stop because they can prove they're done.
 
-ProofLoop is a one-screen prototype for the SF Hacks x GDG AI Hackathon. A community-event signup checker has a weak password rule. You describe the goal in a sentence. The loop stops only when the signup tests actually pass.
+The model proposes a loop contract. The harness owns termination. Nothing is marked done unless `proofAllowsDone` accepts a proof object built from a real test run: test totals, files changed, the policy result, and the attempt count. The compiler is the interface, not the thing that decides the loop is finished.
 
-Three parts stay separate:
-
-1. **The model interprets intent.** Gemini compiles the sentence into a loop contract. With no API key, a local compiler reads the sentence itself (don't touch the tests, ask before deleting, max attempts).
-2. **A deterministic harness controls execution.** Attempts, policies, approval, and stop are code.
-3. **An external verifier decides completion.** The username, password, and email checks run the functions in this process.
+The sample fixture is a community-event signup checker with a weak password rule. Username, password, and email checks execute in an isolated VM context running the controlled demo fixture.
 
 ## Run
 
@@ -19,15 +15,21 @@ npm run dev
 
 Open [http://127.0.0.1:38471](http://127.0.0.1:38471).
 
-Optional Gemini key, in `.env.local`:
+Optional model key, in `.env.local` (gitignored, never commit it):
 
 ```bash
 GEMINI_API_KEY=your-key
 # or GOOGLE_API_KEY=your-key
-# GEMINI_MODEL=gemini-2.5-flash
+# GEMINI_MODEL=gemini-3.8-flash
 ```
 
-Without a key the header says **Local compiler**. The demo still runs. Gemini's only job is natural language to contract JSON.
+Without a key the header says **Local compiler**. The local compiler still parses the sentence (don't touch the tests, ask before deleting, max attempts). The demo loop still runs, and it still cannot be marked done without a proof object.
+
+## Model, license, and dependencies
+
+- **License:** [MIT](LICENSE), Copyright 2026 Bradley Haraguchi.
+- **Model:** `gemini-3.8-flash` through the Gemini API (`@google/genai`). It compiles a natural-language goal into the loop contract and does not run the harness. Override it with `GEMINI_MODEL`. If that call fails, the local compiler is the fallback. `gemma-4-31b-it` accepts the same request, but the app route then returned HTTP 503 and HTTP 500, so it is not the configured model.
+- **Key dependencies:** Next.js, React, `@google/genai`, and `typescript` (used at runtime to compile the signup fixture before the isolated VM runs it).
 
 ## Demo in under a minute
 

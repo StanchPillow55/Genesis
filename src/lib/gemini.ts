@@ -31,7 +31,7 @@ export function geminiCredentials(): { apiKey: string; model: string } | null {
   if (!apiKey?.trim()) return null;
   return {
     apiKey: apiKey.trim(),
-    model: process.env.GEMINI_MODEL?.trim() || "gemini-2.5-flash",
+    model: process.env.GEMINI_MODEL?.trim() || "gemini-3.8-flash",
   };
 }
 
@@ -52,7 +52,7 @@ export async function compileWithGemini(goal: string): Promise<{ contract: LoopC
   });
   const text = response.text;
   if (!text?.trim()) {
-    throw new Error("Gemini returned an empty contract.");
+    throw new Error("The model returned an empty contract.");
   }
   return { contract: parseContract(parseJson(text)), model: credentials.model };
 }

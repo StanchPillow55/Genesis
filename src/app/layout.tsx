@@ -21,7 +21,7 @@ const newsreader = Newsreader({
 export const metadata: Metadata = {
   title: "ProofLoop",
   description:
-    "Agents shouldn't stop because they think they're done. They should stop because they can prove they're done.",
+    "The model proposes a contract. The harness owns termination, and nothing is marked done without a proof object from the test run.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

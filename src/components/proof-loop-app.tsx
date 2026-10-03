@@ -239,10 +239,12 @@ export function ProofLoopApp({
       );
       const compiled = stampEvent(
         "contract-compiled",
-        data.compiler === "gemini" ? "Contract compiled by Gemini" : "Contract compiled locally",
         data.compiler === "gemini"
-          ? `Gemini turned the sentence into a loop contract${data.model ? ` (${data.model})` : ""}.`
-          : "No Gemini key is in this session, so the local compiler read the sentence itself.",
+          ? `Contract compiled by ${data.model ?? "the model"}`
+          : "Contract compiled locally",
+        data.compiler === "gemini"
+          ? `${data.model ?? "The model"} turned the sentence into a loop contract. It does not decide when the loop stops.`
+          : "No model key is in this session, so the local compiler read the sentence itself. The harness still owns termination.",
       );
       compileEvents.current = [created, compiled];
       setTimeline((current) => {
@@ -423,16 +425,19 @@ export function ProofLoopApp({
             <p className="mt-2 font-serif text-xl text-foreground/80 italic sm:text-2xl">
               They should stop because they can prove they&apos;re done.
             </p>
+            <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted-foreground">
+              The model proposes a contract. The harness owns termination, and nothing is marked done unless the test run produces a proof object.
+            </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <StatusPill status={status} />
             <Badge variant="outline">
               {compilerMode === "gemini"
-                ? `Gemini${compilerModel ? ` · ${compilerModel}` : ""}`
+                ? compilerModel ?? "Model"
                 : compilerMode === "fallback"
                   ? "Local compiler"
                   : geminiConfigured
-                    ? "Gemini key found"
+                    ? "API key found"
                     : "Local compiler ready"}
             </Badge>
           </div>
@@ -483,7 +488,7 @@ export function ProofLoopApp({
         ) : null}
         {warning ? (
           <Alert>
-            <AlertTitle>Gemini did not answer.</AlertTitle>
+            <AlertTitle>The model did not answer.</AlertTitle>
             <AlertDescription>{warning}</AlertDescription>
           </Alert>
         ) : null}
@@ -491,20 +496,20 @@ export function ProofLoopApp({
         <section className="grid gap-3 md:grid-cols-3">
           <LayerCard
             index="01"
-            title="LLM interprets intent"
-            body="Gemini, or the local compiler, turns the sentence into a contract. It does not run the loop."
+            title="The model proposes a contract"
+            body="The compiler turns the sentence into a loop contract. That is the interface. It does not decide when the loop is done."
             active={focus === "intent"}
           />
           <LayerCard
             index="02"
-            title="Harness controls execution"
+            title="The harness owns termination"
             body="Attempts, policies, approval, and stop are code. The model is not asked whether to continue."
             active={focus === "harness"}
           />
           <LayerCard
             index="03"
-            title="Verifier decides completion"
-            body="The signup tests run in this process. Pass or fail comes from the functions."
+            title="Nothing is done without proof"
+            body="Status becomes proved only when the proof object has test totals, files changed, the policy result, and the attempt count. The checks run the fixture in an isolated VM context."
             active={focus === "verifier"}
           />
         </section>

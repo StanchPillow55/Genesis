@@ -33,7 +33,9 @@ export async function POST(request: Request) {
         contract: result.contract,
         compiler: "gemini" as const,
         model: result.model,
-        notes: ["Gemini compiled this contract from the sentence. The local parser was not used."],
+        notes: [
+          `${result.model} compiled this contract from the sentence. The local parser was not used. The model does not decide when the loop stops.`,
+        ],
       });
     } catch (error) {
       console.error("Gemini compile failed", error);
@@ -43,7 +45,7 @@ export async function POST(request: Request) {
         compiler: "fallback" as const,
         notes: fallback.notes,
         warning:
-          "A Gemini key is set, but the call failed. This contract came from the local compiler instead.",
+          "The model call failed. This contract came from the local compiler instead. The loop still will not be marked done without a proof object.",
       });
     }
   }

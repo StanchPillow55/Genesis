@@ -154,13 +154,14 @@ function execute(
   filename: string,
   requireImpl: (id: string) => unknown,
 ): Record<string, unknown> {
-  const sandboxModule = { exports: {} as Record<string, unknown> };
-  const sandbox = {
-    module: sandboxModule,
-    exports: sandboxModule.exports,
+  // Isolated VM context running the controlled demo fixture.
+  const fixtureModule = { exports: {} as Record<string, unknown> };
+  const vmContext = {
+    module: fixtureModule,
+    exports: fixtureModule.exports,
     require: requireImpl,
     console: { log() {}, warn() {}, error() {} },
   };
-  vm.runInNewContext(code, sandbox, { timeout: 1000, filename });
-  return sandboxModule.exports;
+  vm.runInNewContext(code, vmContext, { timeout: 1000, filename });
+  return fixtureModule.exports;
 }
