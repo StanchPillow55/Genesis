@@ -1,11 +1,11 @@
-import type { LoopContract, Policy } from "./contract";
+import { formatVerifier, verifierCommandName, type LoopContract, type Policy } from "./contract";
 import {
   applyCompletePasswordFix,
   applyIncompletePasswordFix,
   isPasswordRuleComplete,
   proposeTestCheat,
 } from "./edits";
-import type { CheckResult, VerifyResponse } from "./verifier";
+import type { CheckResult, VerifierReport } from "./verifier";
 
 export type ProjectFiles = {
   validator: string;
@@ -45,7 +45,8 @@ export type ApprovalRecord = {
 };
 
 export type Proof = {
-  testTotals: { passed: number; failed: number; total: number };
+  commands: { command: string; exitCode: number }[];
+  testTotals: { passed: number; failed: number; total: number } | null;
   filesChanged: string[];
   policyResult: {
     blocked: PolicyBlock[];
@@ -78,7 +79,6 @@ export type HarnessEvent =
   | { type: "proof-clear" }
   | { type: "approval-request"; request: ApprovalRequest }
   | { type: "approval-clear" }
-  | { type: "approval-clear" }
   | { type: "focus"; focus: HarnessFocus }
   | { type: "error"; message: string };
 
@@ -87,25 +87,36 @@ export type HarnessOptions = {
   seed: ProjectFiles;
   paceMs: number;
   signal: AbortSignal;
-  verify: (files: { validator: string; tests: string }) => Promise<VerifyResponse>;
+  verify: (input: {
+    commands: LoopContract["verifier"]["commands"];
+    files: { validator: string; tests: string };
+  }) => Promise<VerifierReport>;
   shouldPause: () => boolean;
   waitResume: () => Promise<void>;
   waitApproval: (request: ApprovalRequest) => Promise<"allow" | "deny">;
 };
 
-export function proofAllowsDone(proof: Proof | null | undefined): proof is Proof {
-  if (!proof) return false;
-  const { testTotals, filesChanged, policyResult, attemptCount, maxAttempts, verifier } = proof;
+export function proofAllowsDone(
+  proof: Proof | null | undefined,
+  contract: LoopContract | null | undefined,
+): proof is Proof {
+  if (!proof || !contract || contract.uncertainty) return false;
+  const expected = contract.verifier.commands.map(verifierCommandName);
+  if (expected.length === 0 || proof.commands.length !== expected.length) return false;
+  const commandsOk = expected.every((command, index) => {
+    const result = proof.commands[index];
+    return result?.command === command && result.exitCode === 0;
+  });
+  const { filesChanged, policyResult, attemptCount, verifier } = proof;
   return (
-    testTotals.total === 3 &&
-    testTotals.passed === 3 &&
-    testTotals.failed === 0 &&
+    commandsOk &&
     filesChanged.length > 0 &&
     Array.isArray(policyResult.blocked) &&
     Array.isArray(policyResult.approvals) &&
     Number.isInteger(attemptCount) &&
     attemptCount >= 1 &&
-    attemptCount <= maxAttempts &&
+    attemptCount <= contract.maxAttempts &&
+    proof.maxAttempts === contract.maxAttempts &&
     verifier.trim().length > 0
   );
 }
@@ -371,9 +382,12 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
 
     yield { type: "focus", focus: "verifier" };
     yield { type: "checks", checks: "running" };
-    let result: VerifyResponse;
+    let report: VerifierReport;
     try {
-      result = await verify({ validator: files.validator, tests: files.tests });
+      report = await verify({
+        commands: contract.verifier.commands,
+        files: { validator: files.validator, tests: files.tests },
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       yield { type: "focus", focus: "harness" };
@@ -384,33 +398,38 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
       yield timeline(
         "stop",
         "Stopped",
-        "The verifier crashed before it could score the signup checks. Nothing was marked done.",
+        "The verifier crashed before it could score the contract commands. Nothing was marked done.",
       );
       yield { type: "status", status: "stopped", reason: "crash" };
       return;
     }
     yield { type: "focus", focus: "harness" };
-    yield { type: "checks", checks: result.checks };
+    const checks = checksFromReport(report);
+    yield { type: "checks", checks };
 
-    if (result.crash) {
+    if (report.crash) {
       yield {
         type: "error",
-        message: `The verifier crashed: ${result.crash}`,
+        message: `The verifier crashed: ${report.crash}`,
       };
       yield timeline(
         "stop",
         "Stopped",
-        "The verifier crashed before it could score the signup checks. Nothing was marked done.",
+        "The verifier crashed before it could score the contract commands. Nothing was marked done.",
       );
       yield { type: "status", status: "stopped", reason: "crash" };
       return;
     }
 
-    const allPassed =
-      result.totals.total === 3 && result.totals.passed === 3 && result.totals.failed === 0;
-    if (allPassed) {
+    const commandsPassed =
+      report.commands.length > 0 && report.commands.every((entry) => entry.exitCode === 0);
+    if (commandsPassed) {
       const proof: Proof = {
-        testTotals: result.totals,
+        commands: report.commands.map((entry) => ({
+          command: entry.command,
+          exitCode: entry.exitCode,
+        })),
+        testTotals: report.totals,
         filesChanged: [...filesChanged],
         policyResult: {
           blocked: blocked.map((entry) => ({ ...entry })),
@@ -418,27 +437,26 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
         },
         attemptCount: attempt,
         maxAttempts: contract.maxAttempts,
-        verifier: contract.verifier,
+        verifier: formatVerifier(contract.verifier),
       };
-      if (!proofAllowsDone(proof)) {
+      if (!proofAllowsDone(proof, contract)) {
         yield {
           type: "error",
           message:
-            "The signup tests passed, but the proof record is incomplete. Status stays stopped until totals, files, policy, and attempt count are all present.",
+            "The verifier commands exited 0, but the proof record does not satisfy the contract. Status stays stopped.",
         };
         yield timeline(
           "stop",
           "Stopped without proof",
-          "A passing run without a complete proof object is not done.",
+          "A passing run without a proof object that satisfies the contract is not done.",
         );
         yield { type: "status", status: "stopped", reason: "crash" };
         return;
       }
-      yield timeline(
-        "verify-pass",
-        "Verifier passed",
-        "Username, password, and email all passed by running the functions. The harness did not ask a model.",
-      );
+      const passedDetail = report.checks
+        ? "Username, password, and email all passed by running the functions. The harness did not ask a model."
+        : report.commands.map((entry) => `${entry.command} exited 0.`).join(" ");
+      yield timeline("verify-pass", "Verifier passed", passedDetail);
       yield { type: "proof", proof };
       yield timeline(
         "stop",
@@ -449,7 +467,7 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
       return;
     }
 
-    const failing = result.checks.filter((check) => !check.passed);
+    const failing = checks.filter((check) => !check.passed);
     const failingDetail = failing.map((check) => `${check.name}: ${check.detail}`).join(" ");
     yield timeline(
       "verify-fail",
@@ -482,6 +500,20 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
     yield { type: "status", status: "running", reason: null };
     return answer;
   }
+}
+
+function checksFromReport(report: VerifierReport): CheckResult[] {
+  if (report.checks) return report.checks;
+  return report.commands.map((entry) => ({
+    id: entry.command,
+    name: entry.command,
+    passed: entry.exitCode === 0,
+    detail: entry.timedOut
+      ? "The command timed out."
+      : entry.exitCode === 0
+        ? "Exited 0."
+        : `Exited ${entry.exitCode}.${entry.stderr ? ` ${entry.stderr}` : ""}`,
+  }));
 }
 
 function enforcePolicy(policy: Policy): "apply" | "block" | "ask" {

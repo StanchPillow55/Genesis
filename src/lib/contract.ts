@@ -4,6 +4,24 @@ export const PRESET_GOAL =
 export const POLICIES = ["allow", "deny", "require-approval"] as const;
 export type Policy = (typeof POLICIES)[number];
 
+/** Built-in signup fixture. It passes only when that run exits 0. */
+export type FixtureCommand = {
+  type: "fixture";
+  id: "signup";
+};
+
+/** A shell command such as `npm test`. Success is exit code 0. */
+export type ShellCommand = {
+  type: "shell";
+  command: string;
+};
+
+export type VerifierCommand = FixtureCommand | ShellCommand;
+
+export type VerifierSpec = {
+  commands: VerifierCommand[];
+};
+
 export type LoopContract = {
   goal: string;
   maxAttempts: number;
@@ -12,9 +30,17 @@ export type LoopContract = {
     delete: Policy;
     editSource: Policy;
   };
-  verifier: string;
+  verifier: VerifierSpec;
   uncertainty: string | null;
 };
+
+export function verifierCommandName(command: VerifierCommand): string {
+  return command.type === "fixture" ? command.id : command.command;
+}
+
+export function formatVerifier(verifier: VerifierSpec): string {
+  return verifier.commands.map(verifierCommandName).join(" && ");
+}
 
 export type CompileNotes = {
   contract: LoopContract;
@@ -45,10 +71,16 @@ export function compileWithFallback(input: string): CompileNotes {
   const deletePolicy = parseDelete(text, notes);
   const editSource = parseEditSource(text, notes);
   const maxAttempts = parseMaxAttempts(text, notes);
+  const shellCommands = extractShellCommands(text);
   const hasOutcome = OUTCOME.test(text);
   const hasSubject = SUBJECT.test(text);
   const greeting = /^(hi|hello|hey|asdf|help|idk|something|test)\b/i.test(text);
-  const uncertain = greeting || text.length < 12 || !hasOutcome || !hasSubject;
+  const uncertain =
+    shellCommands.length === 0 && (greeting || text.length < 12 || !hasOutcome || !hasSubject);
+  const verifier: VerifierSpec =
+    shellCommands.length > 0
+      ? { commands: shellCommands.map((command) => ({ type: "shell", command })) }
+      : { commands: [{ type: "fixture", id: "signup" }] };
 
   let uncertainty: string | null = null;
   if (uncertain) {
@@ -68,6 +100,13 @@ export function compileWithFallback(input: string): CompileNotes {
   if (!uncertain) {
     notes.push(`Goal compiled to “${goal}”.`);
   }
+  if (shellCommands.length > 0) {
+    notes.push(
+      `Verifier commands are ${shellCommands.join(" and ")}. Each one must exit 0.`,
+    );
+  } else {
+    notes.push("No shell commands were named, so the verifier is the signup fixture. It must exit 0.");
+  }
 
   return {
     contract: {
@@ -78,7 +117,7 @@ export function compileWithFallback(input: string): CompileNotes {
         delete: deletePolicy,
         editSource,
       },
-      verifier: "run the signup tests",
+      verifier,
       uncertainty,
     },
     notes,
@@ -97,11 +136,7 @@ export function parseContract(input: unknown): LoopContract {
     throw new Error("Contract policies are missing.");
   }
   const policyRecord = policies as Record<string, unknown>;
-  const verifierRaw = raw.verifier;
-  const verifier =
-    typeof verifierRaw === "string" && verifierRaw.trim()
-      ? verifierRaw.trim()
-      : "run the signup tests";
+  const verifier = parseVerifier(raw.verifier);
   let uncertainty: string | null = null;
   if (typeof raw.uncertainty === "string" && raw.uncertainty.trim()) {
     uncertainty = raw.uncertainty.trim();
@@ -137,7 +172,7 @@ function baseContract(partial: Partial<LoopContract> & { uncertainty: string | n
       delete: "allow",
       editSource: "allow",
     },
-    verifier: partial.verifier ?? "run the signup tests",
+    verifier: partial.verifier ?? { commands: [{ type: "fixture", id: "signup" }] },
     uncertainty: partial.uncertainty,
   };
 }
@@ -220,6 +255,86 @@ function parseAttemptCount(value: unknown): number {
     throw new Error("maxAttempts must be between 1 and 20.");
   }
   return number;
+}
+
+function shellCommandPattern(): RegExp {
+  return /\b(?:npm|pnpm|yarn|bun)\s+run\s+[A-Za-z0-9:_-]+|\b(?:npm|pnpm|yarn|bun|npx)\s+[A-Za-z0-9:_-]+|\bcargo\s+(?:test|build|check)\b|\bpytest\b|\bgo\s+test\b|\bmake\s+[A-Za-z0-9:_-]+/g;
+}
+
+export function extractShellCommands(text: string): string[] {
+  const found: string[] = [];
+  for (const match of text.matchAll(shellCommandPattern())) {
+    const command = match[0].replace(/\s+/g, " ").trim();
+    if (!found.includes(command)) found.push(command);
+  }
+  return found;
+}
+
+export function parseVerifier(value: unknown): VerifierSpec {
+  if (typeof value === "string") {
+    return { commands: commandsFromVerifierText(value) };
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      throw new Error("verifier must name at least one command.");
+    }
+    return { commands: value.map((entry) => parseVerifierCommand(entry)) };
+  }
+  if (value && typeof value === "object" && "commands" in value) {
+    const commands = (value as { commands?: unknown }).commands;
+    if (!Array.isArray(commands) || commands.length === 0) {
+      throw new Error("verifier.commands must list at least one command.");
+    }
+    return { commands: commands.map((entry) => parseVerifierCommand(entry)) };
+  }
+  throw new Error("verifier must name shell commands that exit 0, or the signup fixture.");
+}
+
+function parseVerifierCommand(value: unknown): VerifierCommand {
+  if (typeof value === "string") {
+    const commands = commandsFromVerifierText(value);
+    if (commands.length !== 1) {
+      throw new Error("Each verifier entry must be one shell command or the signup fixture.");
+    }
+    return commands[0];
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Each verifier entry must be one shell command or the signup fixture.");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.type === "fixture") {
+    if (record.id !== "signup") {
+      throw new Error("The only built-in fixture is signup.");
+    }
+    return { type: "fixture", id: "signup" };
+  }
+  if (record.type === "shell" || typeof record.command === "string") {
+    if (typeof record.command !== "string" || !record.command.trim()) {
+      throw new Error("A shell verifier needs a command string.");
+    }
+    return { type: "shell", command: record.command.trim() };
+  }
+  throw new Error("Each verifier entry must be one shell command or the signup fixture.");
+}
+
+function commandsFromVerifierText(value: string): VerifierCommand[] {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new Error("verifier must name at least one command.");
+  }
+  if (/^(run the signup tests|signup)$/i.test(trimmed)) {
+    return [{ type: "fixture", id: "signup" }];
+  }
+  const extracted = extractShellCommands(trimmed);
+  const remainder = trimmed
+    .replace(shellCommandPattern(), " ")
+    .replace(/\b(and|then|both|must|succeed|succeeds|pass|passes|exit|code)\b/gi, " ")
+    .replace(/&&/g, " ")
+    .replace(/[^A-Za-z0-9]+/g, "");
+  if (extracted.length > 0 && remainder.length === 0) {
+    return extracted.map((command) => ({ type: "shell", command }));
+  }
+  return [{ type: "shell", command: trimmed }];
 }
 
 function parsePolicy(value: unknown, field: string): Policy {

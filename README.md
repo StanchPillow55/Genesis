@@ -2,7 +2,7 @@
 
 Agents shouldn't stop because they think they're done. They should stop because they can prove they're done.
 
-The model proposes a loop contract. The harness owns termination. Nothing is marked done unless `proofAllowsDone` accepts a proof object built from a real test run: test totals, files changed, the policy result, and the attempt count. The compiler is the interface, not the thing that decides the loop is finished.
+The model proposes a loop contract. The harness owns termination. Nothing is marked done unless `proofAllowsDone` accepts a proof object that satisfies the contract: every named verifier command exited 0, files changed, the policy result, and the attempt count. A passing total of three signup checks is not the completion rule. The compiler is the interface, not the thing that decides the loop is finished.
 
 The sample fixture is a community-event signup checker with a weak password rule. Username, password, and email checks execute in an isolated VM context running the controlled demo fixture.
 
@@ -41,6 +41,27 @@ Without a key the header says **Local compiler**. The local compiler still parse
 6. Attempt 2 applies the real password rule. The verifier passes. The harness stops and the proof panel fills in.
 
 **Pause** holds the same attempt. **Reset** restores the buggy checker.
+
+## Verifiers
+
+A contract names the commands that must exit 0:
+
+```json
+"verifier": {
+  "commands": [
+    { "type": "shell", "command": "npm test" },
+    { "type": "shell", "command": "npm run build" }
+  ]
+}
+```
+
+The signup preset keeps the built-in fixture, which also passes only on exit code 0:
+
+```json
+"verifier": { "commands": [{ "type": "fixture", "id": "signup" }] }
+```
+
+Say `npm test` or `npm run build` in the goal and the local compiler puts those shell commands on the contract. Shell commands run on the machine that serves the app, in the repo directory, with a one-minute timeout.
 
 ## Sample project
 
