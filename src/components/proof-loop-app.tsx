@@ -124,7 +124,7 @@ export function ProofLoopApp({
   const [acceptedBranch, setAcceptedBranch] = useState<string | null>(null);
   const [discarded, setDiscarded] = useState(false);
 
-  const runId = useRef(0);
+  const loopEpoch = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const pauseRef = useRef(false);
   const resumeRef = useRef<(() => void) | null>(null);
@@ -436,7 +436,7 @@ export function ProofLoopApp({
   }
 
   async function startLoop(contract: LoopContract) {
-    const id = ++runId.current;
+    const id = ++loopEpoch.current;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -522,11 +522,11 @@ export function ProofLoopApp({
             };
           }),
       })) {
-        if (id !== runId.current) return;
+        if (id !== loopEpoch.current) return;
         apply(event);
       }
     } catch (caught) {
-      if (id !== runId.current) return;
+      if (id !== loopEpoch.current) return;
       if (caught instanceof Error && caught.name === "AbortError") return;
       setStatus("stopped");
       setStopReason("crash");
@@ -556,7 +556,7 @@ export function ProofLoopApp({
   }
 
   function onReset() {
-    runId.current += 1;
+    loopEpoch.current += 1;
     abortRef.current?.abort();
     pauseRef.current = false;
     proofRef.current = null;
