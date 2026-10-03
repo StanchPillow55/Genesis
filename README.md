@@ -29,6 +29,8 @@ A project run checks out a detached git worktree at the current revision. The or
 
 Verifier commands come from the contract and run through one shell choke point. A command that is not named becomes a contract amendment. Approving that amendment updates the contract and does not run the command. A one-time approval cannot execute it. The signup fixture remains the preset when the goal names no shell command.
 
+The page is a run control surface: goal, contract, the current attempt, the agent action, approvals and amendments, the diff of changed files, verifier results, policy decisions, and proof. It does not browse the project. Pause, resume, and stop stay on the same run. Accept creates the `proofloop/` branch. Discard removes the worktree.
+
 Optional model key, in `.env.local` (gitignored, never commit it):
 
 ```bash

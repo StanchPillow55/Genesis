@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Pause, Play, RotateCcw } from "lucide-react";
+import { Pause, Play, RotateCcw, Square } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { RunSurface } from "@/components/run-surface";
 import {
   PRESET_GOAL,
   contractToJson,
@@ -30,6 +30,7 @@ import {
   type TimelineEvent,
 } from "@/lib/harness";
 import { localApiHeaders } from "@/lib/local-api";
+import { unifiedDiff } from "@/lib/workspace";
 import type { SeedProject } from "@/lib/sample-project";
 import type { PublicSession } from "@/lib/session";
 import type { CommandResult, VerifyResponse } from "@/lib/verifier";
@@ -101,11 +102,19 @@ export function ProofLoopApp({
   const [attempt, setAttempt] = useState(0);
   const [maxAttempts, setMaxAttempts] = useState<number | null>(null);
   const [files, setFiles] = useState<ProjectFiles>(seedFiles);
-  const [checks, setChecks] = useState<CheckView[]>(INITIAL_CHECKS);
+  const [checks, setChecks] = useState<CheckView[]>(session.kind === "project" ? [] : INITIAL_CHECKS);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [proof, setProof] = useState<Proof | null>(null);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [focus, setFocus] = useState<HarnessFocus | null>(null);
+  const [runId, setRunId] = useState<string | null>(null);
+  const [remoteDiff, setRemoteDiff] = useState("");
+  const [remoteChanges, setRemoteChanges] = useState<{ path: string; state: string }[]>([]);
+  const [remoteAgent, setRemoteAgent] = useState<{ name: string; rationale: string } | null>(null);
+  const [remoteApprovals, setRemoteApprovals] = useState<{ action: string; decision: "allow" | "deny" }[]>([]);
+  const [remotePolicy, setRemotePolicy] = useState<{ action: string; decision: string; detail: string }[]>([]);
+  const [acceptedBranch, setAcceptedBranch] = useState<string | null>(null);
+  const [discarded, setDiscarded] = useState(false);
 
   const runId = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
@@ -137,6 +146,72 @@ export function ProofLoopApp({
   useEffect(() => {
     timelineEnd.current?.scrollIntoView({ block: "nearest" });
   }, [timeline]);
+
+  useEffect(() => {
+    if (!runId || session.kind !== "project") return;
+    let cancel = false;
+    async function pull() {
+      try {
+        const response = await fetch(`/api/runs/${runId}`, {
+          headers: localApiHeaders(token, session.projectId),
+        });
+        if (!response.ok || cancel) return;
+        const data = (await response.json()) as {
+          view: {
+            status: RunStatus;
+            stopReason: StopReason;
+            attempt: number;
+            maxAttempts: number;
+            agent: { name: string; rationale: string } | null;
+            approval: ApprovalRequest | null;
+            approvals: { action: string; decision: "allow" | "deny" }[];
+            changedFiles: { path: string; state: string }[];
+            diff: string;
+            checks: { id: string; name: string; passed: boolean; detail: string }[];
+            policyDecisions: { action: string; decision: string; detail: string }[];
+            proof: Proof | null;
+            error: string | null;
+          };
+          accepted: { branch: string | null } | null;
+          discarded: boolean;
+        };
+        if (cancel) return;
+        const view = data.view;
+        setStatus(view.status);
+        setStopReason(view.stopReason);
+        setAttempt(view.attempt);
+        setMaxAttempts(view.maxAttempts);
+        setRemoteAgent(view.agent);
+        setApproval(view.approval);
+        setRemoteApprovals(view.approvals);
+        setRemoteChanges(view.changedFiles);
+        setRemoteDiff(view.diff);
+        setRemotePolicy(view.policyDecisions);
+        setProof(view.proof);
+        setError(view.error);
+        setAcceptedBranch(data.accepted?.branch ?? null);
+        setDiscarded(data.discarded);
+        setChecks(
+          view.checks.length === 0
+            ? []
+            : view.checks.map((check) => ({
+                id: check.id,
+                name: check.name,
+                state: check.passed ? "passed" : "failed",
+                detail: check.detail,
+              })),
+        );
+      } catch {
+        if (!cancel) setError("The run status could not be read.");
+      }
+    }
+    void pull();
+    const timer = setInterval(() => void pull(), 700);
+    return () => {
+      cancel = true;
+      clearInterval(timer);
+    };
+  }, [runId, session.kind, session.projectId, token]);
 
   function apply(event: HarnessEvent) {
     switch (event.type) {
@@ -268,7 +343,55 @@ export function ProofLoopApp({
     }
   }
 
+  async function control(action: string, decision?: "allow" | "deny") {
+    if (!runId) return;
+    const response = await fetch(`/api/runs/${runId}`, {
+      method: "POST",
+      headers: localApiHeaders(token, session.projectId),
+      body: JSON.stringify({ projectId: session.projectId, action, decision }),
+    });
+    const data = (await response.json()) as { error?: string; accepted?: { branch: string | null } | null; discarded?: boolean };
+    if (!response.ok) {
+      setError(data.error ?? "The run could not be updated.");
+      return;
+    }
+    if (data.accepted?.branch) setAcceptedBranch(data.accepted.branch);
+    if (data.discarded) setDiscarded(true);
+  }
+
+  async function startProject(contract: LoopContract) {
+    setError(null);
+    setProof(null);
+    setApproval(null);
+    setAcceptedBranch(null);
+    setDiscarded(false);
+    setRemoteDiff("");
+    setRemoteChanges([]);
+    setRemoteAgent(null);
+    setRemoteApprovals([]);
+    setRemotePolicy([]);
+    setStatus("running");
+    setStopReason(null);
+    const response = await fetch("/api/runs", {
+      method: "POST",
+      headers: localApiHeaders(token, session.projectId),
+      body: JSON.stringify({ projectId: session.projectId, contract }),
+    });
+    const data = (await response.json()) as { error?: string; runId?: string };
+    if (!response.ok || !data.runId) {
+      setStatus("stopped");
+      setStopReason("crash");
+      setError(data.error ?? "The run did not start.");
+      return;
+    }
+    setRunId(data.runId);
+  }
+
   function onRun() {
+    if (session.kind === "project" && status === "stopped" && stopReason === "paused") {
+      void control("resume");
+      return;
+    }
     if (status === "stopped" && stopReason === "paused") {
       pauseRef.current = false;
       const resume = resumeRef.current;
@@ -286,6 +409,10 @@ export function ProofLoopApp({
     }
     if (parsed.contract.uncertainty) {
       setError(parsed.contract.uncertainty);
+      return;
+    }
+    if (session.kind === "project") {
+      void startProject(parsed.contract);
       return;
     }
     void startLoop(parsed.contract);
@@ -391,7 +518,24 @@ export function ProofLoopApp({
   }
 
   function onPause() {
+    if (session.kind === "project") {
+      void control("pause");
+      return;
+    }
     pauseRef.current = true;
+  }
+
+  function onStop() {
+    if (session.kind === "project") {
+      void control("stop");
+      return;
+    }
+    abortRef.current?.abort();
+    pauseRef.current = false;
+    setStatus("stopped");
+    setStopReason(null);
+    setApproval(null);
+    setError("You stopped the harness. Nothing was marked done.");
   }
 
   function onReset() {
@@ -412,6 +556,11 @@ export function ProofLoopApp({
   }
 
   function decide(decision: "allow" | "deny") {
+    if (session.kind === "project") {
+      void control("approval", decision);
+      setApproval(null);
+      return;
+    }
     const resolve = approvalRef.current;
     approvalRef.current = null;
     setApproval(null);
@@ -431,6 +580,45 @@ export function ProofLoopApp({
     setContractText(contractToJson(next));
     setError(null);
   }
+
+  const sampleChanges = [
+    files.validator !== seedFiles.validator ? { path: "validator.ts", state: "modified" } : null,
+    files.tests !== seedFiles.tests ? { path: "signup.test.ts", state: "modified" } : null,
+    files.helper === null ? { path: "legacy-helper.ts", state: "deleted" } : null,
+  ].filter((entry): entry is { path: string; state: string } => entry !== null);
+  const sampleDiff = [
+    unifiedDiff("validator.ts", seedFiles.validator, files.validator),
+    unifiedDiff("signup.test.ts", seedFiles.tests, files.tests),
+    files.helper === null ? unifiedDiff("legacy-helper.ts", seedFiles.helper, null) : "",
+  ].join("");
+  const proposed = [...timeline].reverse().find((event) => event.title.includes("proposed"));
+  const sampleAgent = proposed
+    ? { name: proposed.title.replace(/ proposed a step$/, ""), rationale: proposed.detail }
+    : null;
+  const sampleApprovals = timeline.flatMap((event) => {
+    if (event.kind !== "approval" || event.title === "Waiting for approval") return [];
+    const decision = /denied/i.test(event.title) ? "deny" as const : "allow" as const;
+    return [{ action: event.title, decision }];
+  });
+  const samplePolicy = timeline.flatMap((event) => {
+    if (event.kind === "policy-block") {
+      return [{ action: event.title, decision: "deny", detail: event.detail }];
+    }
+    if (event.kind === "approval" && event.title !== "Waiting for approval") {
+      const amendment = event.title.startsWith("Contract") || event.title.startsWith("Amendment");
+      return [{
+        action: event.title,
+        decision: amendment ? "amend" : /denied/i.test(event.title) ? "deny" : "ask",
+        detail: event.detail,
+      }];
+    }
+    return [];
+  });
+  const surfaceChanges = session.kind === "project" ? remoteChanges : sampleChanges;
+  const surfaceDiff = session.kind === "project" ? remoteDiff : sampleDiff;
+  const surfaceAgent = session.kind === "project" ? remoteAgent : sampleAgent;
+  const surfaceApprovals = session.kind === "project" ? remoteApprovals : sampleApprovals;
+  const surfacePolicy = session.kind === "project" ? remotePolicy : samplePolicy;
 
   const attemptLabel = maxAttempts
     ? `Attempt ${attempt} / ${maxAttempts}`
@@ -504,12 +692,25 @@ export function ProofLoopApp({
               <p className="mt-1 max-w-3xl text-sm leading-relaxed">{approval.detail}</p>
             </div>
             <div className="flex gap-2">
-              <Button type="button" onClick={() => decide("allow")}>
-                Allow once
-              </Button>
-              <Button type="button" variant="outline" onClick={() => decide("deny")}>
-                Deny
-              </Button>
+              {approval.id.startsWith("amend-") ? (
+                <>
+                  <Button type="button" onClick={() => decide("allow")}>
+                    Add to contract
+                  </Button>
+                  <Button type="button" variant="outline" onClick={() => decide("deny")}>
+                    Keep contract
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button type="button" onClick={() => decide("allow")}>
+                    Allow once
+                  </Button>
+                  <Button type="button" variant="outline" onClick={() => decide("deny")}>
+                    Deny
+                  </Button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -661,6 +862,10 @@ export function ProofLoopApp({
                     <Pause />
                     Pause
                   </Button>
+                  <Button type="button" variant="outline" onClick={onStop} disabled={status !== "running" && status !== "waiting-for-approval"}>
+                    <Square />
+                    Stop
+                  </Button>
                   <Button type="button" variant="ghost" onClick={onReset}>
                     <RotateCcw />
                     Reset
@@ -670,81 +875,24 @@ export function ProofLoopApp({
             </Card>
           </div>
 
-          <div className="flex min-w-0 flex-col gap-4">
-            <Card>
-              <CardHeader>
-                <CardTitle>Verification</CardTitle>
-                <CardDescription>
-                  Commands named in the contract. The signup preset runs username, password, and email. A shell command passes only when it exits 0.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-2">
-                {checks.every((check) => check.state === "not-run") ? (
-                  <p className="text-sm text-muted-foreground">
-                    These three checks have not been executed yet. The password check starts failing because the rule only requires four characters.
-                  </p>
-                ) : null}
-                <ul className="divide-y divide-border">
-                  {checks.map((check) => (
-                    <li key={check.id} className="flex items-start gap-3 py-2">
-                      <CheckMark state={check.state} />
-                      <div className="min-w-0">
-                        <p className="font-medium">{check.name}</p>
-                        <p className="text-sm text-muted-foreground">{check.detail}</p>
-                      </div>
-                      <span className="ml-auto text-xs tracking-wide text-muted-foreground uppercase">
-                        {check.state === "not-run"
-                          ? "Not run"
-                          : check.state === "running"
-                            ? "Running"
-                            : check.state === "passed"
-                              ? "Pass"
-                              : "Fail"}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              </CardContent>
-            </Card>
-
-            <Card className="min-w-0">
-              <CardHeader>
-                <CardTitle>Signup checker</CardTitle>
-                <CardDescription>
-                  Neighborhood organizers run this before someone claims a volunteer shift. The password rule is too weak.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Tabs defaultValue="validator">
-                  <TabsList>
-                    <TabsTrigger value="validator">validator.ts</TabsTrigger>
-                    <TabsTrigger value="tests">signup.test.ts</TabsTrigger>
-                    <TabsTrigger value="helper">legacy-helper.ts</TabsTrigger>
-                  </TabsList>
-                  <TabsContent value="validator" className="pt-3">
-                    <FileMeta changed={files.validator !== seedFiles.validator} />
-                    <CodeView source={files.validator} baseline={seedFiles.validator} />
-                  </TabsContent>
-                  <TabsContent value="tests" className="pt-3">
-                    <FileMeta changed={files.tests !== seedFiles.tests} />
-                    <CodeView source={files.tests} baseline={seedFiles.tests} />
-                  </TabsContent>
-                  <TabsContent value="helper" className="pt-3">
-                    {files.helper === null ? (
-                      <p className="text-sm leading-relaxed text-muted-foreground">
-                        legacy-helper.ts was removed after you allowed it. The signup tests do not import it, so the checker still runs.
-                      </p>
-                    ) : (
-                      <>
-                        <FileMeta changed={false} />
-                        <CodeView source={files.helper} baseline={seedFiles.helper ?? ""} />
-                      </>
-                    )}
-                  </TabsContent>
-                </Tabs>
-              </CardContent>
-            </Card>
-          </div>
+          <RunSurface
+            status={status}
+            stopReason={stopReason}
+            attempt={attempt}
+            maxAttempts={maxAttempts}
+            agent={surfaceAgent}
+            approvals={surfaceApprovals}
+            changedFiles={surfaceChanges}
+            diff={surfaceDiff}
+            checks={checks}
+            policyDecisions={surfacePolicy}
+            proof={proof}
+            sessionKind={session.kind}
+            acceptedBranch={acceptedBranch}
+            discarded={discarded}
+            onAccept={() => void control("accept")}
+            onDiscard={() => void control("discard")}
+          />
 
           <div className="flex min-w-0 flex-col gap-4">
             <Card>
@@ -867,39 +1015,6 @@ function CheckMark({ state }: { state: CheckView["state"] }) {
     >
       {symbol}
     </span>
-  );
-}
-
-function FileMeta({ changed }: { changed: boolean }) {
-  return (
-    <p className="mb-2 text-xs text-muted-foreground">
-      {changed ? "Changed by the harness in this run." : "Unchanged from the seed."}
-    </p>
-  );
-}
-
-function CodeView({ source, baseline }: { source: string; baseline: string }) {
-  const current = source.split("\n");
-  const previous = baseline.split("\n");
-  return (
-    <div className="max-h-80 overflow-auto rounded-lg bg-[#1c1915] text-[#f3ead7]">
-      <pre className="p-3 font-mono text-[12px] leading-5">
-        {current.map((line, index) => {
-          const changed = line !== previous[index];
-          return (
-            <div
-              key={`${index}-${line}`}
-              className={cn("px-2", changed && "bg-amber-200/15")}
-            >
-              <span className="mr-3 inline-block w-6 text-right text-[#f3ead7]/40 select-none">
-                {index + 1}
-              </span>
-              {line || " "}
-            </div>
-          );
-        })}
-      </pre>
-    </div>
   );
 }
 
