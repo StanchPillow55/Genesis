@@ -1,13 +1,32 @@
 import ts from "typescript";
 import vm from "node:vm";
 
+import type { VerifierCommand } from "./contract";
+import { verifierCommandName } from "./contract";
+
 export type CheckId = "username" | "password" | "email";
 
 export type CheckResult = {
-  id: CheckId;
+  id: string;
   name: string;
   passed: boolean;
   detail: string;
+};
+
+export type CommandResult = {
+  command: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+};
+
+export type VerifierReport = {
+  ok: boolean;
+  commands: CommandResult[];
+  checks: CheckResult[] | null;
+  totals: { passed: number; failed: number; total: number } | null;
+  crash: string | null;
 };
 
 export type VerifyResponse = {
@@ -114,6 +133,60 @@ export function verifySignup(files: { validator: string; tests: string }): Verif
       crash: message,
     };
   }
+}
+
+export async function runVerifierCommands(
+  input: {
+    commands: VerifierCommand[];
+    files?: { validator: string; tests: string };
+  },
+  runCommand: (command: string) => Promise<CommandResult>,
+): Promise<VerifierReport> {
+  const commands: CommandResult[] = [];
+  let checks: CheckResult[] | null = null;
+  let totals: VerifierReport["totals"] = null;
+  let crash: string | null = null;
+
+  for (const spec of input.commands) {
+    const name = verifierCommandName(spec);
+    if (spec.type === "fixture") {
+      if (!input.files) {
+        commands.push({
+          command: name,
+          exitCode: 1,
+          stdout: "",
+          stderr: "The signup fixture needs validator.ts and signup.test.ts.",
+          timedOut: false,
+        });
+        continue;
+      }
+      const signup = verifySignup(input.files);
+      checks = signup.checks;
+      totals = signup.totals;
+      if (signup.crash) crash = signup.crash;
+      const passed = signup.ok && !signup.crash;
+      commands.push({
+        command: name,
+        exitCode: passed ? 0 : 1,
+        stdout: "",
+        stderr: signup.crash ?? "",
+        timedOut: false,
+      });
+      continue;
+    }
+
+    const result = await runCommand(spec.command);
+    commands.push({
+      command: name,
+      exitCode: result.timedOut ? 124 : result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      timedOut: result.timedOut,
+    });
+  }
+
+  const ok = crash === null && commands.length > 0 && commands.every((entry) => entry.exitCode === 0);
+  return { ok, commands, checks, totals, crash };
 }
 
 function messageFrom(error: unknown): string {

@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PRESET_GOAL, compileWithFallback } from "./contract";
+import type { AgentBackend } from "./agent";
 import { runHarness, proofAllowsDone, type HarnessEvent, type Proof } from "./harness";
+import { createSignupDouble } from "./signup-double";
 import { loadSeedProject } from "./sample-project";
-import { verifySignup } from "./verifier";
+import { runShellCommand } from "./shell";
+import { runVerifierCommands, verifySignup } from "./verifier";
 
 const seed = loadSeedProject();
 
@@ -14,7 +17,9 @@ test("fallback compiler reads the preset sentence", () => {
   assert.equal(compiled.contract.policies.modifyTests, "deny");
   assert.equal(compiled.contract.policies.delete, "require-approval");
   assert.equal(compiled.contract.policies.editSource, "allow");
-  assert.equal(compiled.contract.verifier, "run the signup tests");
+  assert.deepEqual(compiled.contract.verifier, {
+    commands: [{ type: "fixture", id: "signup" }],
+  });
   assert.equal(compiled.contract.uncertainty, null);
   assert.match(compiled.notes.join(" "), /modifyTests = deny/);
   assert.match(compiled.notes.join(" "), /require approval/);
@@ -35,6 +40,46 @@ test("fallback compiler asks when the goal is unclear", () => {
   assert.ok(compiled.contract.uncertainty);
   const vague = compileWithFallback("Make it nicer");
   assert.ok(vague.contract.uncertainty);
+});
+
+test("a contract can name npm test and npm run build", () => {
+  const compiled = compileWithFallback(
+    "Make the repo healthy when npm test and npm run build both succeed.",
+  );
+  assert.equal(compiled.contract.uncertainty, null);
+  assert.deepEqual(compiled.contract.verifier.commands, [
+    { type: "shell", command: "npm test" },
+    { type: "shell", command: "npm run build" },
+  ]);
+});
+
+test("shell verifiers succeed only when every command exits 0", async () => {
+  const pass = await runVerifierCommands(
+    {
+      commands: [
+        { type: "shell", command: "node -e \"process.exit(0)\"" },
+        { type: "shell", command: "node -e \"process.exit(0)\"" },
+      ],
+    },
+    (command) => runShellCommand(command, { timeoutMs: 15_000 }),
+  );
+  assert.equal(pass.ok, true);
+  assert.deepEqual(
+    pass.commands.map((entry) => entry.exitCode),
+    [0, 0],
+  );
+
+  const fail = await runVerifierCommands(
+    {
+      commands: [
+        { type: "shell", command: "node -e \"process.exit(0)\"" },
+        { type: "shell", command: "node -e \"process.exit(2)\"" },
+      ],
+    },
+    (command) => runShellCommand(command, { timeoutMs: 15_000 }),
+  );
+  assert.equal(fail.ok, false);
+  assert.equal(fail.commands[1]?.exitCode, 2);
 });
 
 test("signup tests actually fail, then fail again, then pass", () => {
@@ -79,9 +124,10 @@ test("harness blocks test edits, asks before delete, and stops on proof", async 
 
   const proof = events.find((event) => event.type === "proof");
   assert.ok(proof && proof.type === "proof");
-  assert.equal(proofAllowsDone(proof.proof), true);
+  assert.equal(proofAllowsDone(proof.proof, contract), true);
   assert.equal(proof.proof.attemptCount, 2);
-  assert.equal(proof.proof.testTotals.passed, 3);
+  assert.deepEqual(proof.proof.commands, [{ command: "signup", exitCode: 0 }]);
+  assert.equal(proof.proof.testTotals?.passed, 3);
   assert.deepEqual(proof.proof.filesChanged, ["validator.ts"]);
   assert.equal(proof.proof.policyResult.blocked.some((entry) => entry.file === "signup.test.ts"), true);
   assert.deepEqual(proof.proof.policyResult.approvals, [
@@ -94,6 +140,13 @@ test("harness blocks test edits, asks before delete, and stops on proof", async 
   assert.equal(lastFiles.files.tests, seed.tests);
   assert.equal(lastFiles.files.helper, seed.helper);
   assert.match(lastFiles.files.validator, /const hasNumber/);
+  assert.match(
+    events
+      .filter((event) => event.type === "timeline")
+      .map((event) => (event.type === "timeline" ? event.event.title : ""))
+      .join("\n"),
+    /deterministic-double proposed a step/,
+  );
   assert.match(
     events
       .filter((event) => event.type === "timeline")
@@ -136,7 +189,9 @@ test("pause holds the harness until resume", async () => {
     seed: { validator: seed.validator, tests: seed.tests, helper: seed.helper },
     paceMs: 0,
     signal: new AbortController().signal,
-    verify: async (files) => verifySignup(files),
+    signup: async (files) => verifySignup(files),
+    shell: (command) => runShellCommand(command, { timeoutMs: 15_000 }),
+    backend: createSignupDouble(),
     shouldPause: () => pauses === 0,
     waitResume: () => {
       pauses += 1;
@@ -162,16 +217,111 @@ test("a passing total without files changed is not proof", async () => {
   const proofEvent = events.find((event) => event.type === "proof");
   assert.ok(proofEvent && proofEvent.type === "proof");
   const stripped: Proof = { ...proofEvent.proof, filesChanged: [] };
-  assert.equal(proofAllowsDone(stripped), false);
-  assert.equal(proofAllowsDone(null), false);
+  assert.equal(proofAllowsDone(stripped, contract), false);
+  assert.equal(proofAllowsDone(null, contract), false);
+  assert.equal(proofAllowsDone(proofEvent.proof, null), false);
+});
+
+test("three passing totals do not prove a command that exited non-zero", () => {
+  const contract = compileWithFallback(PRESET_GOAL).contract;
+  contract.verifier = {
+    commands: [
+      { type: "shell", command: "npm test" },
+      { type: "shell", command: "npm run build" },
+    ],
+  };
+  const proof: Proof = {
+    commands: [
+      { command: "npm test", exitCode: 0 },
+      { command: "npm run build", exitCode: 1 },
+    ],
+    testTotals: { passed: 3, failed: 0, total: 3 },
+    filesChanged: ["validator.ts"],
+    policyResult: { blocked: [], approvals: [] },
+    attemptCount: 1,
+    maxAttempts: contract.maxAttempts,
+    verifier: "npm test && npm run build",
+  };
+  assert.equal(proofAllowsDone(proof, contract), false);
+
+  proof.commands[1] = { command: "npm run build", exitCode: 0 };
+  assert.equal(proofAllowsDone(proof, contract), true);
+});
+
+test("harness stops when the contract shell commands exit 0", async () => {
+  const contract = compileWithFallback(PRESET_GOAL).contract;
+  contract.verifier = {
+    commands: [{ type: "shell", command: "node -e \"process.exit(0)\"" }],
+  };
+  const events = await collect({ contract, decision: "deny" });
+  const proof = events.find((event) => event.type === "proof");
+  assert.ok(proof && proof.type === "proof");
+  assert.equal(proofAllowsDone(proof.proof, contract), true);
+  assert.deepEqual(proof.proof.commands, [
+    { command: "node -e \"process.exit(0)\"", exitCode: 0 },
+  ]);
+  assert.equal(proof.proof.testTotals, null);
+  assert.equal(proof.proof.attemptCount, 1);
+});
+
+test("the loop applies the backend step instead of a baked-in edit", async () => {
+  const contract = compileWithFallback(PRESET_GOAL).contract;
+  contract.maxAttempts = 1;
+  const idle: AgentBackend = {
+    name: "idle-double",
+    async proposeStep() {
+      return { rationale: "Change nothing.", actions: [] };
+    },
+  };
+  const events = await collect({ contract, decision: "deny", backend: idle });
+  const lastFiles = events.filter((event) => event.type === "files").at(-1);
+  assert.ok(lastFiles && lastFiles.type === "files");
+  assert.equal(lastFiles.files.validator, seed.validator);
+  assert.equal(events.some((event) => event.type === "proof"), false);
+
+  const fixed = seed.validator.replace(
+    /export function validatePassword\(password: string\): boolean \{[\s\S]*?\n\}/,
+    `export function validatePassword(password: string): boolean {
+  const longEnough = password.length >= 8;
+  const hasLetter = /[A-Za-z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  return longEnough && hasLetter && hasNumber;
+}`,
+  );
+  const once: AgentBackend = {
+    name: "fixed-on-first-try",
+    async proposeStep() {
+      return {
+        rationale: "Write the full password rule.",
+        actions: [{ type: "write", path: "validator.ts", contents: fixed }],
+      };
+    },
+  };
+  const proved = await collect({
+    contract: compileWithFallback(PRESET_GOAL).contract,
+    decision: "deny",
+    backend: once,
+  });
+  const proof = proved.find((event) => event.type === "proof");
+  assert.ok(proof && proof.type === "proof");
+  assert.equal(proof.proof.attemptCount, 1);
+  assert.match(
+    proved
+      .filter((event) => event.type === "timeline")
+      .map((event) => (event.type === "timeline" ? event.event.title : ""))
+      .join("\n"),
+    /fixed-on-first-try proposed a step/,
+  );
 });
 
 async function collect({
   contract,
   decision,
+  backend = createSignupDouble(),
 }: {
   contract: ReturnType<typeof compileWithFallback>["contract"];
   decision: "allow" | "deny";
+  backend?: AgentBackend;
 }): Promise<HarnessEvent[]> {
   const events: HarnessEvent[] = [];
   for await (const event of runHarness({
@@ -179,7 +329,9 @@ async function collect({
     seed: { validator: seed.validator, tests: seed.tests, helper: seed.helper },
     paceMs: 0,
     signal: new AbortController().signal,
-    verify: async (files) => verifySignup(files),
+    signup: async (files) => verifySignup(files),
+    shell: (command) => runShellCommand(command, { timeoutMs: 15_000 }),
+    backend,
     shouldPause: () => false,
     waitResume: async () => {},
     waitApproval: async () => decision,

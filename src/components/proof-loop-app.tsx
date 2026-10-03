@@ -15,6 +15,8 @@ import {
   parseContract,
   type LoopContract,
 } from "@/lib/contract";
+import { createRemoteGeminiBackend } from "@/lib/agent-client";
+import { createSignupDouble } from "@/lib/signup-double";
 import {
   proofAllowsDone,
   runHarness,
@@ -28,11 +30,11 @@ import {
   type TimelineEvent,
 } from "@/lib/harness";
 import type { SeedProject } from "@/lib/sample-project";
-import type { VerifyResponse } from "@/lib/verifier";
+import type { CommandResult, VerifyResponse } from "@/lib/verifier";
 import { cn } from "@/lib/utils";
 
 type CheckView = {
-  id: "username" | "password" | "email";
+  id: string;
   name: string;
   state: "not-run" | "running" | "passed" | "failed";
   detail: string;
@@ -105,6 +107,7 @@ export function ProofLoopApp({
   const resumeRef = useRef<(() => void) | null>(null);
   const approvalRef = useRef<((decision: "allow" | "deny") => void) | null>(null);
   const proofRef = useRef<Proof | null>(null);
+  const contractRef = useRef<LoopContract | null>(null);
   const compileEvents = useRef<TimelineEvent[]>([]);
   const timelineEnd = useRef<HTMLDivElement | null>(null);
 
@@ -132,7 +135,7 @@ export function ProofLoopApp({
   function apply(event: HarnessEvent) {
     switch (event.type) {
       case "status":
-        if (event.status === "proved" && !proofAllowsDone(proofRef.current)) {
+        if (event.status === "proved" && !proofAllowsDone(proofRef.current, contractRef.current)) {
           setStatus("stopped");
           setStopReason("crash");
           setError("The harness tried to mark this done without a complete proof object.");
@@ -173,7 +176,7 @@ export function ProofLoopApp({
         return;
       case "proof":
         proofRef.current = event.proof;
-        setProof(proofAllowsDone(event.proof) ? event.proof : null);
+        setProof(proofAllowsDone(event.proof, contractRef.current) ? event.proof : null);
         return;
       case "proof-clear":
         proofRef.current = null;
@@ -289,6 +292,7 @@ export function ProofLoopApp({
     abortRef.current = controller;
     pauseRef.current = false;
     proofRef.current = null;
+    contractRef.current = contract;
     setError(null);
     setApproval(null);
     setProof(null);
@@ -307,17 +311,39 @@ export function ProofLoopApp({
         seed: seedFiles,
         paceMs: 680,
         signal: controller.signal,
-        verify: async (current) => {
+        signup: async (current) => {
           const response = await fetch("/api/verify", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(current),
+            body: JSON.stringify({
+              commands: [{ type: "fixture", id: "signup" }],
+              validator: current.validator,
+              tests: current.tests,
+            }),
           });
-          const data = (await response.json()) as VerifyResponse & { error?: string };
+          const data = (await response.json()) as VerifyResponse & { error?: string; checks?: VerifyResponse["checks"] | null };
           if (!response.ok) {
             throw new Error(data.error ?? "The verifier request failed.");
           }
-          return data;
+          return {
+            ok: data.ok,
+            checks: data.checks ?? [],
+            totals: data.totals,
+            crash: data.crash,
+          };
+        },
+        backend: geminiConfigured ? createRemoteGeminiBackend() : createSignupDouble(),
+        shell: async (command) => {
+          const response = await fetch("/api/exec", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command, verifier: contract.verifier }),
+          });
+          const data = (await response.json()) as { error?: string; result?: CommandResult };
+          if (!response.ok || !data.result) {
+            throw new Error(data.error ?? "The command did not run.");
+          }
+          return data.result;
         },
         shouldPause: () => pauseRef.current,
         waitResume: () =>
@@ -503,13 +529,13 @@ export function ProofLoopApp({
           <LayerCard
             index="02"
             title="The harness owns termination"
-            body="Attempts, policies, approval, and stop are code. The model is not asked whether to continue."
+            body="Attempts, policies, approval, and stop are code. The agent proposes a step. It is not asked whether to continue."
             active={focus === "harness"}
           />
           <LayerCard
             index="03"
             title="Nothing is done without proof"
-            body="Status becomes proved only when the proof object has test totals, files changed, the policy result, and the attempt count. The checks run the fixture in an isolated VM context."
+            body="Status becomes proved only when every command named in the contract exits 0 and the proof object records files, policy, and the attempt. The signup preset runs in an isolated VM context."
             active={focus === "verifier"}
           />
         </section>
@@ -521,6 +547,9 @@ export function ProofLoopApp({
                 <CardTitle>Goal</CardTitle>
                 <CardDescription>
                   Say what done means. Mention tests, deletes, or a max attempt count if you care about them.
+                  {geminiConfigured
+                    ? " A Gemini key is set, so Run loop asks that model for each step. The model does not decide when the loop is done."
+                    : " No model key is set, so Run loop uses a deterministic double and does not pretend a live model ran."}
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-3">
@@ -636,7 +665,7 @@ export function ProofLoopApp({
               <CardHeader>
                 <CardTitle>Verification</CardTitle>
                 <CardDescription>
-                  Three checks in the community-event signup checker. They execute here. A model does not score them.
+                  Commands named in the contract. The signup preset runs username, password, and email. A shell command passes only when it exits 0.
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-2">
@@ -712,7 +741,7 @@ export function ProofLoopApp({
               <CardHeader>
                 <CardTitle>Proof</CardTitle>
                 <CardDescription>
-                  Status cannot be proved until this record has totals, files, policy, and an attempt count.
+                  Status cannot be proved until every contract command exits 0 and this record includes files, policy, and an attempt count.
                 </CardDescription>
               </CardHeader>
               <CardContent>
@@ -721,7 +750,7 @@ export function ProofLoopApp({
                 ) : (
                   <div className="space-y-2 text-sm leading-relaxed text-muted-foreground">
                     <p>
-                      No proof on file. A green check from a model is not evidence. The loop stays open until the signup tests pass and this panel lists test totals, files changed, the policy result, and the attempt count.
+                      No proof on file. A green check from a model is not evidence. The loop stays open until every command in the contract exits 0 and this panel lists those commands, files changed, the policy result, and the attempt count.
                     </p>
                     {status === "stopped" && stopReason === "max-attempts" ? (
                       <p>
@@ -870,11 +899,23 @@ function ProofPanel({ proof }: { proof: Proof }) {
       <p className="font-serif text-3xl text-emerald-900 italic">Proved</p>
       <dl className="grid gap-3 text-sm">
         <div>
-          <dt className="text-xs tracking-wide text-muted-foreground uppercase">Test totals</dt>
-          <dd>
-            {proof.testTotals.passed} passed, {proof.testTotals.failed} failed, {proof.testTotals.total} total
+          <dt className="text-xs tracking-wide text-muted-foreground uppercase">Commands</dt>
+          <dd className="space-y-1">
+            {proof.commands.map((entry) => (
+              <p key={entry.command}>
+                {entry.command}: exit {entry.exitCode}
+              </p>
+            ))}
           </dd>
         </div>
+        {proof.testTotals ? (
+          <div>
+            <dt className="text-xs tracking-wide text-muted-foreground uppercase">Test totals</dt>
+            <dd>
+              {proof.testTotals.passed} passed, {proof.testTotals.failed} failed, {proof.testTotals.total} total
+            </dd>
+          </div>
+        ) : null}
         <div>
           <dt className="text-xs tracking-wide text-muted-foreground uppercase">Files changed</dt>
           <dd>{proof.filesChanged.join(", ")}</dd>

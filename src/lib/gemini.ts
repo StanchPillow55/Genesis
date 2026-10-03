@@ -2,7 +2,7 @@ import { GoogleGenAI } from "@google/genai";
 import { parseContract, type LoopContract } from "./contract";
 
 const SYSTEM = `You compile a natural-language goal into a loop contract for ProofLoop.
-ProofLoop checks a community-event signup validator. The only verifier is the signup tests (username, password, email).
+ProofLoop proves a goal by running verifier commands. Each command succeeds only when its exit code is 0.
 Return ONLY JSON with this shape:
 {
   "goal": string,
@@ -12,7 +12,11 @@ Return ONLY JSON with this shape:
     "delete": "allow" | "deny" | "require-approval",
     "editSource": "allow" | "deny" | "require-approval"
   },
-  "verifier": "run the signup tests",
+  "verifier": {
+    "commands": [
+      { "type": "fixture", "id": "signup" }
+    ]
+  },
   "uncertainty": string | null
 }
 Rules:
@@ -22,7 +26,8 @@ Rules:
 - "ask before deleting" or "ask me before deleting" means delete is "require-approval".
 - "never delete" means delete is "deny".
 - editSource is "allow" unless the user restricts source edits.
-- verifier is always "run the signup tests".
+- If the user names shell commands such as "npm test" or "npm run build", verifier.commands is one { "type": "shell", "command": "<exact command>" } per command, in the order they were named. Success is exit code 0.
+- If the user does not name a shell command, verifier.commands is [{ "type": "fixture", "id": "signup" }], the built-in signup checker. That fixture also passes only on exit code 0.
 - If the goal does not say what completion means, set uncertainty to one specific question for the human and do not invent a confident goal. Otherwise uncertainty is null.
 - Do not wrap the JSON in markdown.`;
 
