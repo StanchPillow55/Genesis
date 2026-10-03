@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { PRESET_GOAL, compileWithFallback } from "./contract";
+import type { AgentBackend } from "./agent";
 import { runHarness, proofAllowsDone, type HarnessEvent, type Proof } from "./harness";
+import { createSignupDouble } from "./signup-double";
 import { loadSeedProject } from "./sample-project";
 import { runShellCommand } from "./shell";
 import { runVerifierCommands, verifySignup } from "./verifier";
@@ -141,6 +143,13 @@ test("harness blocks test edits, asks before delete, and stops on proof", async 
   assert.match(
     events
       .filter((event) => event.type === "timeline")
+      .map((event) => (event.type === "timeline" ? event.event.title : ""))
+      .join("\n"),
+    /deterministic-double proposed a step/,
+  );
+  assert.match(
+    events
+      .filter((event) => event.type === "timeline")
       .map((event) => (event.type === "timeline" ? event.event.detail : ""))
       .join("\n"),
     /verifier failed/,
@@ -182,6 +191,7 @@ test("pause holds the harness until resume", async () => {
     signal: new AbortController().signal,
     signup: async (files) => verifySignup(files),
     shell: (command) => runShellCommand(command, { timeoutMs: 15_000 }),
+    backend: createSignupDouble(),
     shouldPause: () => pauses === 0,
     waitResume: () => {
       pauses += 1;
@@ -254,12 +264,64 @@ test("harness stops when the contract shell commands exit 0", async () => {
   assert.equal(proof.proof.attemptCount, 1);
 });
 
+test("the loop applies the backend step instead of a baked-in edit", async () => {
+  const contract = compileWithFallback(PRESET_GOAL).contract;
+  contract.maxAttempts = 1;
+  const idle: AgentBackend = {
+    name: "idle-double",
+    async proposeStep() {
+      return { rationale: "Change nothing.", actions: [] };
+    },
+  };
+  const events = await collect({ contract, decision: "deny", backend: idle });
+  const lastFiles = events.filter((event) => event.type === "files").at(-1);
+  assert.ok(lastFiles && lastFiles.type === "files");
+  assert.equal(lastFiles.files.validator, seed.validator);
+  assert.equal(events.some((event) => event.type === "proof"), false);
+
+  const fixed = seed.validator.replace(
+    /export function validatePassword\(password: string\): boolean \{[\s\S]*?\n\}/,
+    `export function validatePassword(password: string): boolean {
+  const longEnough = password.length >= 8;
+  const hasLetter = /[A-Za-z]/.test(password);
+  const hasNumber = /[0-9]/.test(password);
+  return longEnough && hasLetter && hasNumber;
+}`,
+  );
+  const once: AgentBackend = {
+    name: "fixed-on-first-try",
+    async proposeStep() {
+      return {
+        rationale: "Write the full password rule.",
+        actions: [{ type: "write", path: "validator.ts", contents: fixed }],
+      };
+    },
+  };
+  const proved = await collect({
+    contract: compileWithFallback(PRESET_GOAL).contract,
+    decision: "deny",
+    backend: once,
+  });
+  const proof = proved.find((event) => event.type === "proof");
+  assert.ok(proof && proof.type === "proof");
+  assert.equal(proof.proof.attemptCount, 1);
+  assert.match(
+    proved
+      .filter((event) => event.type === "timeline")
+      .map((event) => (event.type === "timeline" ? event.event.title : ""))
+      .join("\n"),
+    /fixed-on-first-try proposed a step/,
+  );
+});
+
 async function collect({
   contract,
   decision,
+  backend = createSignupDouble(),
 }: {
   contract: ReturnType<typeof compileWithFallback>["contract"];
   decision: "allow" | "deny";
+  backend?: AgentBackend;
 }): Promise<HarnessEvent[]> {
   const events: HarnessEvent[] = [];
   for await (const event of runHarness({
@@ -269,6 +331,7 @@ async function collect({
     signal: new AbortController().signal,
     signup: async (files) => verifySignup(files),
     shell: (command) => runShellCommand(command, { timeoutMs: 15_000 }),
+    backend,
     shouldPause: () => false,
     waitResume: async () => {},
     waitApproval: async () => decision,

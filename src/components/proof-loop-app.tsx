@@ -15,6 +15,8 @@ import {
   parseContract,
   type LoopContract,
 } from "@/lib/contract";
+import { createRemoteGeminiBackend } from "@/lib/agent-client";
+import { createSignupDouble } from "@/lib/signup-double";
 import {
   proofAllowsDone,
   runHarness,
@@ -330,6 +332,7 @@ export function ProofLoopApp({
             crash: data.crash,
           };
         },
+        backend: geminiConfigured ? createRemoteGeminiBackend() : createSignupDouble(),
         shell: async (command) => {
           const response = await fetch("/api/exec", {
             method: "POST",
@@ -526,7 +529,7 @@ export function ProofLoopApp({
           <LayerCard
             index="02"
             title="The harness owns termination"
-            body="Attempts, policies, approval, and stop are code. The model is not asked whether to continue."
+            body="Attempts, policies, approval, and stop are code. The agent proposes a step. It is not asked whether to continue."
             active={focus === "harness"}
           />
           <LayerCard
@@ -544,6 +547,9 @@ export function ProofLoopApp({
                 <CardTitle>Goal</CardTitle>
                 <CardDescription>
                   Say what done means. Mention tests, deletes, or a max attempt count if you care about them.
+                  {geminiConfigured
+                    ? " A Gemini key is set, so Run loop asks that model for each step. The model does not decide when the loop is done."
+                    : " No model key is set, so Run loop uses a deterministic double and does not pretend a live model ran."}
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-3">

@@ -23,13 +23,17 @@ GEMINI_API_KEY=your-key
 # GEMINI_MODEL=gemini-3.8-flash
 ```
 
-Without a key the header says **Local compiler**. The local compiler still parses the sentence (don't touch the tests, ask before deleting, max attempts). The demo loop still runs, and it still cannot be marked done without a proof object.
+Without a key the header says **Local compiler**. The local compiler still parses the sentence (don't touch the tests, ask before deleting, max attempts). The demo loop still runs on a deterministic double, which is not a live model, and it still cannot be marked done without a proof object. With a key, Run loop asks Gemini for each step through `AgentBackend.proposeStep`. The model does not decide when the loop stops.
 
 ## Model, license, and dependencies
 
 - **License:** [MIT](LICENSE), Copyright 2026 Bradley Haraguchi.
 - **Model:** `gemini-3.8-flash` through the Gemini API (`@google/genai`). It compiles a natural-language goal into the loop contract and does not run the harness. Override it with `GEMINI_MODEL`. If that call fails, the local compiler is the fallback. `gemma-4-31b-it` accepts the same request, but the app route then returned HTTP 503 and HTTP 500, so it is not the configured model.
 - **Key dependencies:** Next.js, React, `@google/genai`, and `typescript` (used at runtime to compile the signup fixture before the isolated VM runs it).
+
+## Agent
+
+The harness calls `AgentBackend.proposeStep` and applies the returned writes and deletes through the workspace. `src/lib/signup-double.ts` is the deterministic double used by tests and by the demo when no API key is set. `src/lib/gemini-agent.ts` calls Gemini when `GEMINI_API_KEY` or `GOOGLE_API_KEY` is set. If neither key is set, that backend throws and does not invent a step.
 
 ## Demo in under a minute
 
