@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { AgentBackend, ProposedAction } from "./agent";
+import { selectContext } from "./context-select";
 import { applyAmendment, formatVerifier, type LoopContract } from "./contract";
 import {
   proofAllowsDone,
@@ -98,7 +99,13 @@ export async function runProjectLoop(options: {
     view.checks = checksFromReport(before);
     publish();
 
-    const files = options.listFiles ? await options.listFiles() : await filesFromWorkspace(workspace);
+    const listed = options.listFiles ? await options.listFiles() : await filesFromWorkspace(workspace);
+    const files = selectContext({
+      goal: contract.goal,
+      verifierOutput: verifierFailure ?? "",
+      changedPaths: [...filesChanged],
+      files: listed,
+    });
     let proposal;
     try {
       proposal = await backend.proposeStep({
