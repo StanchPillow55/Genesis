@@ -28,7 +28,7 @@ import {
   type TimelineEvent,
 } from "@/lib/harness";
 import type { SeedProject } from "@/lib/sample-project";
-import type { VerifierReport } from "@/lib/verifier";
+import type { CommandResult, VerifyResponse } from "@/lib/verifier";
 import { cn } from "@/lib/utils";
 
 type CheckView = {
@@ -309,21 +309,38 @@ export function ProofLoopApp({
         seed: seedFiles,
         paceMs: 680,
         signal: controller.signal,
-        verify: async (current) => {
+        signup: async (current) => {
           const response = await fetch("/api/verify", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              commands: current.commands,
-              validator: current.files.validator,
-              tests: current.files.tests,
+              commands: [{ type: "fixture", id: "signup" }],
+              validator: current.validator,
+              tests: current.tests,
             }),
           });
-          const data = (await response.json()) as VerifierReport & { error?: string };
+          const data = (await response.json()) as VerifyResponse & { error?: string; checks?: VerifyResponse["checks"] | null };
           if (!response.ok) {
             throw new Error(data.error ?? "The verifier request failed.");
           }
-          return data;
+          return {
+            ok: data.ok,
+            checks: data.checks ?? [],
+            totals: data.totals,
+            crash: data.crash,
+          };
+        },
+        shell: async (command) => {
+          const response = await fetch("/api/exec", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ command, verifier: contract.verifier }),
+          });
+          const data = (await response.json()) as { error?: string; result?: CommandResult };
+          if (!response.ok || !data.result) {
+            throw new Error(data.error ?? "The command did not run.");
+          }
+          return data.result;
         },
         shouldPause: () => pauseRef.current,
         waitResume: () =>

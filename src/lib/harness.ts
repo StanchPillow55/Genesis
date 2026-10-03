@@ -1,11 +1,13 @@
-import { formatVerifier, verifierCommandName, type LoopContract, type Policy } from "./contract";
+import { formatVerifier, verifierCommandName, type LoopContract } from "./contract";
 import {
   applyCompletePasswordFix,
   applyIncompletePasswordFix,
   isPasswordRuleComplete,
   proposeTestCheat,
 } from "./edits";
-import type { CheckResult, VerifierReport } from "./verifier";
+import type { CheckResult, CommandResult, VerifierReport, VerifyResponse } from "./verifier";
+import { verifyWithWorkspace } from "./verify-run";
+import { createMemoryWorkspace, policyFromContract, type Workspace } from "./workspace";
 
 export type ProjectFiles = {
   validator: string;
@@ -87,10 +89,8 @@ export type HarnessOptions = {
   seed: ProjectFiles;
   paceMs: number;
   signal: AbortSignal;
-  verify: (input: {
-    commands: LoopContract["verifier"]["commands"];
-    files: { validator: string; tests: string };
-  }) => Promise<VerifierReport>;
+  signup: (files: { validator: string; tests: string }) => Promise<VerifyResponse>;
+  shell: (command: string) => Promise<CommandResult>;
   shouldPause: () => boolean;
   waitResume: () => Promise<void>;
   waitApproval: (request: ApprovalRequest) => Promise<"allow" | "deny">;
@@ -122,12 +122,17 @@ export function proofAllowsDone(
 }
 
 export async function* runHarness(options: HarnessOptions): AsyncGenerator<HarnessEvent> {
-  const { contract, seed, signal, verify, shouldPause, waitResume, waitApproval } = options;
-  let files: ProjectFiles = {
-    validator: seed.validator,
-    tests: seed.tests,
-    helper: seed.helper,
-  };
+  const { contract, seed, signal, signup, shell, shouldPause, waitResume, waitApproval } = options;
+  const workspace = createMemoryWorkspace({
+    files: {
+      "validator.ts": seed.validator,
+      "signup.test.ts": seed.tests,
+      ...(seed.helper !== null ? { "legacy-helper.ts": seed.helper } : {}),
+    },
+    policy: policyFromContract(contract),
+    shell,
+  });
+  let files = await readProject(workspace);
   const blocked: PolicyBlock[] = [];
   const approvals: ApprovalRecord[] = [];
   const filesChanged = new Set<string>();
@@ -177,10 +182,11 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
       "The harness opened this attempt. Completion still depends on the verifier.",
     );
 
+    files = await readProject(workspace);
     yield timeline(
       "read",
       "Read validator.ts",
-      "Signup checker source. The password rule is what the failing check is about.",
+      "Signup checker source, read through the workspace. The password rule is what the failing check is about.",
     );
     yield* beat();
     yield timeline(
@@ -193,7 +199,7 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
       yield timeline(
         "read",
         "Read legacy-helper.ts",
-        "A stale draft. The signup tests do not import it.",
+        "A stale draft, read through the workspace. The signup tests do not import it.",
       );
       yield* beat();
     }
@@ -201,8 +207,12 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
     if (attempt === 1) {
       const cheat = proposeTestCheat(files.tests);
       if (cheat.ok) {
-        const decision = enforcePolicy(contract.policies.modifyTests);
-        if (decision === "block") {
+        const decision = workspace.decide({
+          type: "write",
+          path: "signup.test.ts",
+          contents: cheat.source,
+        });
+        if (decision === "deny") {
           blocked.push({
             file: "signup.test.ts",
             policy: "modifyTests",
@@ -223,14 +233,17 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
           const answer = yield* askForApproval(request);
           approvals.push({ action: "modify signup.test.ts", decision: answer });
           if (answer === "allow") {
-            files = { ...files, tests: cheat.source };
-            filesChanged.add("signup.test.ts");
-            yield { type: "files", files: cloneFiles(files) };
-            yield timeline(
-              "edit",
-              "Edited signup.test.ts",
-              "You allowed the test change once. The verifier will run the edited checks.",
-            );
+            const written = await workspace.write("signup.test.ts", cheat.source, { approved: true });
+            if (written.ok && written.value.changed) {
+              filesChanged.add("signup.test.ts");
+              files = await readProject(workspace);
+              yield { type: "files", files: cloneFiles(files) };
+              yield timeline(
+                "edit",
+                "Edited signup.test.ts",
+                "You allowed the test change once. The verifier will run the edited checks.",
+              );
+            }
           } else {
             yield timeline(
               "approval",
@@ -239,21 +252,24 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
             );
           }
         } else {
-          files = { ...files, tests: cheat.source };
-          filesChanged.add("signup.test.ts");
-          yield { type: "files", files: cloneFiles(files) };
-          yield timeline(
-            "edit",
-            "Edited signup.test.ts",
-            `modifyTests is allow, so the harness applied the agent's test edit.\n${cheat.diff ?? ""}`.trim(),
-          );
+          const written = await workspace.write("signup.test.ts", cheat.source);
+          if (written.ok && written.value.changed) {
+            filesChanged.add("signup.test.ts");
+            files = await readProject(workspace);
+            yield { type: "files", files: cloneFiles(files) };
+            yield timeline(
+              "edit",
+              "Edited signup.test.ts",
+              `modifyTests is allow, so the harness applied the agent's test edit.\n${cheat.diff ?? ""}`.trim(),
+            );
+          }
         }
         yield* beat();
       }
 
       if (files.helper !== null) {
-        const decision = enforcePolicy(contract.policies.delete);
-        if (decision === "block") {
+        const decision = workspace.decide({ type: "delete", path: "legacy-helper.ts" });
+        if (decision === "deny") {
           blocked.push({
             file: "legacy-helper.ts",
             policy: "delete",
@@ -274,14 +290,17 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
           const answer = yield* askForApproval(request);
           approvals.push({ action: "delete legacy-helper.ts", decision: answer });
           if (answer === "allow") {
-            files = { ...files, helper: null };
-            filesChanged.add("legacy-helper.ts");
-            yield { type: "files", files: cloneFiles(files) };
-            yield timeline(
-              "edit",
-              "Deleted legacy-helper.ts",
-              "You allowed the delete once. The signup tests do not import that file, so the checker still runs.",
-            );
+            const removed = await workspace.delete("legacy-helper.ts", { approved: true });
+            if (removed.ok && removed.value.deleted) {
+              filesChanged.add("legacy-helper.ts");
+              files = await readProject(workspace);
+              yield { type: "files", files: cloneFiles(files) };
+              yield timeline(
+                "edit",
+                "Deleted legacy-helper.ts",
+                "You allowed the delete once. The signup tests do not import that file, so the checker still runs.",
+              );
+            }
           } else {
             yield timeline(
               "approval",
@@ -290,14 +309,17 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
             );
           }
         } else {
-          files = { ...files, helper: null };
-          filesChanged.add("legacy-helper.ts");
-          yield { type: "files", files: cloneFiles(files) };
-          yield timeline(
-            "edit",
-            "Deleted legacy-helper.ts",
-            "delete is allow, so the harness removed the stale helper without stopping for approval.",
-          );
+          const removed = await workspace.delete("legacy-helper.ts");
+          if (removed.ok && removed.value.deleted) {
+            filesChanged.add("legacy-helper.ts");
+            files = await readProject(workspace);
+            yield { type: "files", files: cloneFiles(files) };
+            yield timeline(
+              "edit",
+              "Deleted legacy-helper.ts",
+              "delete is allow, so the harness removed the stale helper without stopping for approval.",
+            );
+          }
         }
         yield* beat();
       }
@@ -306,75 +328,75 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
     if (!isPasswordRuleComplete(files.validator)) {
       const useIncomplete =
         attempt === 1 && files.validator.includes("return password.length >= 4;");
-      const decision = enforcePolicy(contract.policies.editSource);
-      if (decision === "block") {
-        blocked.push({
-          file: "validator.ts",
-          policy: "editSource",
-          reason: useIncomplete
-            ? "The agent proposed raising the password length without requiring a number."
-            : "The agent proposed the full password rule.",
+      const proposed = useIncomplete
+        ? applyIncompletePasswordFix(files.validator)
+        : applyCompletePasswordFix(files.validator);
+      if (!proposed.ok) {
+        yield timeline("edit", "Source edit did not apply", proposed.reason);
+      } else {
+        const decision = workspace.decide({
+          type: "write",
+          path: "validator.ts",
+          contents: proposed.source,
         });
-        yield timeline(
-          "policy-block",
-          "Blocked edit to validator.ts",
-          "editSource is deny. The checker source was not modified.",
-        );
-      } else if (decision === "ask") {
-        const request: ApprovalRequest = {
-          id: `edit-source-${attempt}`,
-          title: useIncomplete ? "Allow a partial password edit?" : "Allow the password fix?",
-          detail: useIncomplete
-            ? "The agent wants to change the password rule to length >= 8 and stop there. editSource is require approval."
-            : "The agent wants to require 8 characters, a letter, and a number. editSource is require approval.",
-        };
-        const answer = yield* askForApproval(request);
-        approvals.push({
-          action: useIncomplete ? "partial edit validator.ts" : "fix validator.ts",
-          decision: answer,
-        });
-        if (answer === "allow") {
-          const applied = useIncomplete
-            ? applyIncompletePasswordFix(files.validator)
-            : applyCompletePasswordFix(files.validator);
-          if (!applied.ok) {
-            yield timeline("edit", "Source edit did not apply", applied.reason);
-          } else if (applied.changed) {
-            files = { ...files, validator: applied.source };
+        const detail = useIncomplete
+          ? "Raised the password length to 8. A letter and a number are still not required."
+          : "Password rule now requires 8 characters, a letter, and a number.";
+        if (decision === "deny") {
+          blocked.push({
+            file: "validator.ts",
+            policy: "editSource",
+            reason: useIncomplete
+              ? "The agent proposed raising the password length without requiring a number."
+              : "The agent proposed the full password rule.",
+          });
+          yield timeline(
+            "policy-block",
+            "Blocked edit to validator.ts",
+            "editSource is deny. The checker source was not modified.",
+          );
+        } else if (decision === "ask") {
+          const request: ApprovalRequest = {
+            id: `edit-source-${attempt}`,
+            title: useIncomplete ? "Allow a partial password edit?" : "Allow the password fix?",
+            detail: useIncomplete
+              ? "The agent wants to change the password rule to length >= 8 and stop there. editSource is require approval."
+              : "The agent wants to require 8 characters, a letter, and a number. editSource is require approval.",
+          };
+          const answer = yield* askForApproval(request);
+          approvals.push({
+            action: useIncomplete ? "partial edit validator.ts" : "fix validator.ts",
+            decision: answer,
+          });
+          if (answer === "allow") {
+            const written = await workspace.write("validator.ts", proposed.source, { approved: true });
+            if (written.ok && written.value.changed) {
+              filesChanged.add("validator.ts");
+              files = await readProject(workspace);
+              yield { type: "files", files: cloneFiles(files) };
+              yield timeline("edit", "Edited validator.ts", detail);
+            }
+          } else {
+            yield timeline(
+              "approval",
+              "Source edit denied",
+              "validator.ts stays as it is. The loop continues to the verifier.",
+            );
+          }
+        } else {
+          const written = await workspace.write("validator.ts", proposed.source);
+          if (written.ok && written.value.changed) {
             filesChanged.add("validator.ts");
+            files = await readProject(workspace);
             yield { type: "files", files: cloneFiles(files) };
             yield timeline(
               "edit",
               "Edited validator.ts",
               useIncomplete
-                ? "Raised the password length to 8. A letter and a number are still not required."
-                : "Password rule now requires 8 characters, a letter, and a number.",
+                ? "Raised the password length to 8. A letter and a number are still not required, so this attempt is incomplete on purpose."
+                : detail,
             );
           }
-        } else {
-          yield timeline(
-            "approval",
-            "Source edit denied",
-            "validator.ts stays as it is. The loop continues to the verifier.",
-          );
-        }
-      } else {
-        const applied = useIncomplete
-          ? applyIncompletePasswordFix(files.validator)
-          : applyCompletePasswordFix(files.validator);
-        if (!applied.ok) {
-          yield timeline("edit", "Source edit did not apply", applied.reason);
-        } else if (applied.changed) {
-          files = { ...files, validator: applied.source };
-          filesChanged.add("validator.ts");
-          yield { type: "files", files: cloneFiles(files) };
-          yield timeline(
-            "edit",
-            "Edited validator.ts",
-            useIncomplete
-              ? "Raised the password length to 8. A letter and a number are still not required, so this attempt is incomplete on purpose."
-              : "Password rule now requires 8 characters, a letter, and a number.",
-          );
         }
       }
       yield* beat();
@@ -384,10 +406,8 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
     yield { type: "checks", checks: "running" };
     let report: VerifierReport;
     try {
-      report = await verify({
-        commands: contract.verifier.commands,
-        files: { validator: files.validator, tests: files.tests },
-      });
+      files = await readProject(workspace);
+      report = await verifyThroughWorkspace(workspace, contract, signup);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       yield { type: "focus", focus: "harness" };
@@ -502,6 +522,28 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
   }
 }
 
+async function readProject(workspace: Workspace): Promise<ProjectFiles> {
+  const validator = await workspace.read("validator.ts");
+  const tests = await workspace.read("signup.test.ts");
+  if (!validator.ok || !tests.ok) {
+    throw new Error("The workspace refused to read the signup fixture.");
+  }
+  const helper = await workspace.read("legacy-helper.ts").catch(() => null);
+  return {
+    validator: validator.value,
+    tests: tests.value,
+    helper: helper && helper.ok ? helper.value : null,
+  };
+}
+
+function verifyThroughWorkspace(
+  workspace: Workspace,
+  contract: LoopContract,
+  signup: (files: { validator: string; tests: string }) => Promise<VerifyResponse>,
+): Promise<VerifierReport> {
+  return verifyWithWorkspace(workspace, contract.verifier.commands, signup);
+}
+
 function checksFromReport(report: VerifierReport): CheckResult[] {
   if (report.checks) return report.checks;
   return report.commands.map((entry) => ({
@@ -514,12 +556,6 @@ function checksFromReport(report: VerifierReport): CheckResult[] {
         ? "Exited 0."
         : `Exited ${entry.exitCode}.${entry.stderr ? ` ${entry.stderr}` : ""}`,
   }));
-}
-
-function enforcePolicy(policy: Policy): "apply" | "block" | "ask" {
-  if (policy === "allow") return "apply";
-  if (policy === "deny") return "block";
-  return "ask";
 }
 
 function cloneFiles(files: ProjectFiles): ProjectFiles {

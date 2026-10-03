@@ -63,6 +63,10 @@ The signup preset keeps the built-in fixture, which also passes only on exit cod
 
 Say `npm test` or `npm run build` in the goal and the local compiler puts those shell commands on the contract. Shell commands run on the machine that serves the app, in the repo directory, with a one-minute timeout.
 
+## Workspace
+
+Reads, writes, deletes, diffs, status, and shell commands go through the workspace. A policy engine returns `allow`, `deny`, or `ask` before the action. `deny` leaves the file untouched. `ask` waits for a grant. The signup demo keeps its files in a memory workspace; `POST /api/exec` runs an allowed verifier command through a filesystem workspace rooted at the repo.
+
 ## Sample project
 
 `sample/community-signup/`

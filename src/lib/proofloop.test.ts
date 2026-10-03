@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PRESET_GOAL, compileWithFallback, type LoopContract } from "./contract";
+import { PRESET_GOAL, compileWithFallback } from "./contract";
 import { runHarness, proofAllowsDone, type HarnessEvent, type Proof } from "./harness";
 import { loadSeedProject } from "./sample-project";
 import { runShellCommand } from "./shell";
@@ -180,7 +180,8 @@ test("pause holds the harness until resume", async () => {
     seed: { validator: seed.validator, tests: seed.tests, helper: seed.helper },
     paceMs: 0,
     signal: new AbortController().signal,
-    verify: (input) => verifyInput(input),
+    signup: async (files) => verifySignup(files),
+    shell: (command) => runShellCommand(command, { timeoutMs: 15_000 }),
     shouldPause: () => pauses === 0,
     waitResume: () => {
       pauses += 1;
@@ -253,13 +254,6 @@ test("harness stops when the contract shell commands exit 0", async () => {
   assert.equal(proof.proof.attemptCount, 1);
 });
 
-function verifyInput(input: {
-  commands: LoopContract["verifier"]["commands"];
-  files: { validator: string; tests: string };
-}) {
-  return runVerifierCommands(input, (command) => runShellCommand(command, { timeoutMs: 15_000 }));
-}
-
 async function collect({
   contract,
   decision,
@@ -273,7 +267,8 @@ async function collect({
     seed: { validator: seed.validator, tests: seed.tests, helper: seed.helper },
     paceMs: 0,
     signal: new AbortController().signal,
-    verify: (input) => verifyInput(input),
+    signup: async (files) => verifySignup(files),
+    shell: (command) => runShellCommand(command, { timeoutMs: 15_000 }),
     shouldPause: () => false,
     waitResume: async () => {},
     waitApproval: async () => decision,
