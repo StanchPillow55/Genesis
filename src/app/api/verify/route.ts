@@ -1,6 +1,8 @@
 import { parseVerifier, type VerifierCommand } from "@/lib/contract";
 import { runShellCommand } from "@/lib/shell";
-import { runVerifierCommands } from "@/lib/verifier";
+import { verifySignup } from "@/lib/verifier";
+import { verifyWithWorkspace } from "@/lib/verify-run";
+import { createMemoryWorkspace, policyFromContract } from "@/lib/workspace";
 
 export const runtime = "nodejs";
 
@@ -49,13 +51,21 @@ export async function POST(request: Request) {
     );
   }
 
-  const report = await runVerifierCommands(
-    {
-      commands,
-      files: validator !== undefined && tests !== undefined ? { validator, tests } : undefined,
-    },
-    (command) => runShellCommand(command, { cwd: process.cwd(), timeoutMs: 60_000 }),
-  );
+  const files: Record<string, string> = {};
+  if (validator !== undefined) files["validator.ts"] = validator;
+  if (tests !== undefined) files["signup.test.ts"] = tests;
+  const workspace = createMemoryWorkspace({
+    files,
+    policy: policyFromContract({
+      goal: "run verifier",
+      maxAttempts: 1,
+      policies: { modifyTests: "deny", delete: "deny", editSource: "deny" },
+      verifier: { commands },
+      uncertainty: null,
+    }),
+    shell: (command) => runShellCommand(command, { cwd: process.cwd(), timeoutMs: 60_000 }),
+  });
+  const report = await verifyWithWorkspace(workspace, commands, verifySignup);
   return Response.json(report);
 }
 

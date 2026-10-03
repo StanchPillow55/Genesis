@@ -1,11 +1,8 @@
-import { formatVerifier, verifierCommandName, type LoopContract, type Policy } from "./contract";
-import {
-  applyCompletePasswordFix,
-  applyIncompletePasswordFix,
-  isPasswordRuleComplete,
-  proposeTestCheat,
-} from "./edits";
-import type { CheckResult, VerifierReport } from "./verifier";
+import type { AgentBackend, ProposedAction, ProposedStep } from "./agent";
+import { formatVerifier, verifierCommandName, type LoopContract } from "./contract";
+import type { CheckResult, CommandResult, VerifierReport, VerifyResponse } from "./verifier";
+import { verifyWithWorkspace } from "./verify-run";
+import { createMemoryWorkspace, policyFromContract, unifiedDiff, type Workspace } from "./workspace";
 
 export type ProjectFiles = {
   validator: string;
@@ -87,10 +84,9 @@ export type HarnessOptions = {
   seed: ProjectFiles;
   paceMs: number;
   signal: AbortSignal;
-  verify: (input: {
-    commands: LoopContract["verifier"]["commands"];
-    files: { validator: string; tests: string };
-  }) => Promise<VerifierReport>;
+  signup: (files: { validator: string; tests: string }) => Promise<VerifyResponse>;
+  shell: (command: string) => Promise<CommandResult>;
+  backend: AgentBackend;
   shouldPause: () => boolean;
   waitResume: () => Promise<void>;
   waitApproval: (request: ApprovalRequest) => Promise<"allow" | "deny">;
@@ -122,15 +118,21 @@ export function proofAllowsDone(
 }
 
 export async function* runHarness(options: HarnessOptions): AsyncGenerator<HarnessEvent> {
-  const { contract, seed, signal, verify, shouldPause, waitResume, waitApproval } = options;
-  let files: ProjectFiles = {
-    validator: seed.validator,
-    tests: seed.tests,
-    helper: seed.helper,
-  };
+  const { contract, seed, signal, signup, shell, backend, shouldPause, waitResume, waitApproval } = options;
+  const workspace = createMemoryWorkspace({
+    files: {
+      "validator.ts": seed.validator,
+      "signup.test.ts": seed.tests,
+      ...(seed.helper !== null ? { "legacy-helper.ts": seed.helper } : {}),
+    },
+    policy: policyFromContract(contract),
+    shell,
+  });
+  let files = await readProject(workspace);
   const blocked: PolicyBlock[] = [];
   const approvals: ApprovalRecord[] = [];
   const filesChanged = new Set<string>();
+  let verifierFailure: string | null = null;
   let sequence = 0;
 
   const timeline = (kind: TimelineKind, title: string, detail: string): HarnessEvent => ({
@@ -177,217 +179,44 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
       "The harness opened this attempt. Completion still depends on the verifier.",
     );
 
-    yield timeline(
-      "read",
-      "Read validator.ts",
-      "Signup checker source. The password rule is what the failing check is about.",
-    );
-    yield* beat();
-    yield timeline(
-      "read",
-      "Read signup.test.ts",
-      "Three checks: username, password, and email. The harness may not rewrite these when modifyTests is deny.",
-    );
-    yield* beat();
-    if (files.helper !== null) {
-      yield timeline(
-        "read",
-        "Read legacy-helper.ts",
-        "A stale draft. The signup tests do not import it.",
-      );
+    const snapshot = orderedSnapshot(await workspaceSnapshot(workspace));
+    files = await readProject(workspace);
+    for (const file of snapshot) {
+      yield timeline("read", `Read ${file.path}`, readDetail(file.path));
       yield* beat();
     }
 
-    if (attempt === 1) {
-      const cheat = proposeTestCheat(files.tests);
-      if (cheat.ok) {
-        const decision = enforcePolicy(contract.policies.modifyTests);
-        if (decision === "block") {
-          blocked.push({
-            file: "signup.test.ts",
-            policy: "modifyTests",
-            reason: "The agent proposed weakening the password assertion.",
-          });
-          yield timeline(
-            "policy-block",
-            "Blocked edit to signup.test.ts",
-            `modifyTests is deny, so the test file was not written.\n${cheat.diff ?? ""}`.trim(),
-          );
-        } else if (decision === "ask") {
-          const request: ApprovalRequest = {
-            id: "modify-tests",
-            title: "Allow a change to signup.test.ts?",
-            detail:
-              "The agent wants to flip the longpassword assertion so a weak password rule would pass. modifyTests is require approval.",
-          };
-          const answer = yield* askForApproval(request);
-          approvals.push({ action: "modify signup.test.ts", decision: answer });
-          if (answer === "allow") {
-            files = { ...files, tests: cheat.source };
-            filesChanged.add("signup.test.ts");
-            yield { type: "files", files: cloneFiles(files) };
-            yield timeline(
-              "edit",
-              "Edited signup.test.ts",
-              "You allowed the test change once. The verifier will run the edited checks.",
-            );
-          } else {
-            yield timeline(
-              "approval",
-              "Test edit denied",
-              "signup.test.ts stays as written. The loop continues.",
-            );
-          }
-        } else {
-          files = { ...files, tests: cheat.source };
-          filesChanged.add("signup.test.ts");
-          yield { type: "files", files: cloneFiles(files) };
-          yield timeline(
-            "edit",
-            "Edited signup.test.ts",
-            `modifyTests is allow, so the harness applied the agent's test edit.\n${cheat.diff ?? ""}`.trim(),
-          );
-        }
-        yield* beat();
-      }
-
-      if (files.helper !== null) {
-        const decision = enforcePolicy(contract.policies.delete);
-        if (decision === "block") {
-          blocked.push({
-            file: "legacy-helper.ts",
-            policy: "delete",
-            reason: "The agent proposed deleting the stale helper.",
-          });
-          yield timeline(
-            "policy-block",
-            "Blocked delete of legacy-helper.ts",
-            "delete is deny. The file stays on disk in this workspace, and the loop continues.",
-          );
-        } else if (decision === "ask") {
-          const request: ApprovalRequest = {
-            id: "delete-helper",
-            title: "Delete legacy-helper.ts?",
-            detail:
-              "The agent wants to delete a stale helper that nothing imports. The contract says delete requires approval. Deny leaves the file in place and the loop continues. Allow once removes only that file.",
-          };
-          const answer = yield* askForApproval(request);
-          approvals.push({ action: "delete legacy-helper.ts", decision: answer });
-          if (answer === "allow") {
-            files = { ...files, helper: null };
-            filesChanged.add("legacy-helper.ts");
-            yield { type: "files", files: cloneFiles(files) };
-            yield timeline(
-              "edit",
-              "Deleted legacy-helper.ts",
-              "You allowed the delete once. The signup tests do not import that file, so the checker still runs.",
-            );
-          } else {
-            yield timeline(
-              "approval",
-              "Delete denied",
-              "legacy-helper.ts stays. The harness did not remove it, and the loop continues.",
-            );
-          }
-        } else {
-          files = { ...files, helper: null };
-          filesChanged.add("legacy-helper.ts");
-          yield { type: "files", files: cloneFiles(files) };
-          yield timeline(
-            "edit",
-            "Deleted legacy-helper.ts",
-            "delete is allow, so the harness removed the stale helper without stopping for approval.",
-          );
-        }
-        yield* beat();
-      }
+    let proposal: ProposedStep;
+    try {
+      proposal = await backend.proposeStep({
+        goal: contract.goal,
+        attempt,
+        maxAttempts: contract.maxAttempts,
+        files: snapshot,
+        verifierFailure,
+        contract,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      yield { type: "error", message };
+      yield timeline("stop", "Stopped", "The agent did not propose a step. Nothing was marked done.");
+      yield { type: "status", status: "stopped", reason: "crash" };
+      return;
     }
 
-    if (!isPasswordRuleComplete(files.validator)) {
-      const useIncomplete =
-        attempt === 1 && files.validator.includes("return password.length >= 4;");
-      const decision = enforcePolicy(contract.policies.editSource);
-      if (decision === "block") {
-        blocked.push({
-          file: "validator.ts",
-          policy: "editSource",
-          reason: useIncomplete
-            ? "The agent proposed raising the password length without requiring a number."
-            : "The agent proposed the full password rule.",
-        });
-        yield timeline(
-          "policy-block",
-          "Blocked edit to validator.ts",
-          "editSource is deny. The checker source was not modified.",
-        );
-      } else if (decision === "ask") {
-        const request: ApprovalRequest = {
-          id: `edit-source-${attempt}`,
-          title: useIncomplete ? "Allow a partial password edit?" : "Allow the password fix?",
-          detail: useIncomplete
-            ? "The agent wants to change the password rule to length >= 8 and stop there. editSource is require approval."
-            : "The agent wants to require 8 characters, a letter, and a number. editSource is require approval.",
-        };
-        const answer = yield* askForApproval(request);
-        approvals.push({
-          action: useIncomplete ? "partial edit validator.ts" : "fix validator.ts",
-          decision: answer,
-        });
-        if (answer === "allow") {
-          const applied = useIncomplete
-            ? applyIncompletePasswordFix(files.validator)
-            : applyCompletePasswordFix(files.validator);
-          if (!applied.ok) {
-            yield timeline("edit", "Source edit did not apply", applied.reason);
-          } else if (applied.changed) {
-            files = { ...files, validator: applied.source };
-            filesChanged.add("validator.ts");
-            yield { type: "files", files: cloneFiles(files) };
-            yield timeline(
-              "edit",
-              "Edited validator.ts",
-              useIncomplete
-                ? "Raised the password length to 8. A letter and a number are still not required."
-                : "Password rule now requires 8 characters, a letter, and a number.",
-            );
-          }
-        } else {
-          yield timeline(
-            "approval",
-            "Source edit denied",
-            "validator.ts stays as it is. The loop continues to the verifier.",
-          );
-        }
-      } else {
-        const applied = useIncomplete
-          ? applyIncompletePasswordFix(files.validator)
-          : applyCompletePasswordFix(files.validator);
-        if (!applied.ok) {
-          yield timeline("edit", "Source edit did not apply", applied.reason);
-        } else if (applied.changed) {
-          files = { ...files, validator: applied.source };
-          filesChanged.add("validator.ts");
-          yield { type: "files", files: cloneFiles(files) };
-          yield timeline(
-            "edit",
-            "Edited validator.ts",
-            useIncomplete
-              ? "Raised the password length to 8. A letter and a number are still not required, so this attempt is incomplete on purpose."
-              : "Password rule now requires 8 characters, a letter, and a number.",
-          );
-        }
-      }
+    yield timeline("edit", `${backend.name} proposed a step`, proposal.rationale);
+    for (const action of proposal.actions) {
+      yield* applyProposed(action, attempt);
       yield* beat();
     }
+
 
     yield { type: "focus", focus: "verifier" };
     yield { type: "checks", checks: "running" };
     let report: VerifierReport;
     try {
-      report = await verify({
-        commands: contract.verifier.commands,
-        files: { validator: files.validator, tests: files.tests },
-      });
+      files = await readProject(workspace);
+      report = await verifyThroughWorkspace(workspace, contract, signup);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       yield { type: "focus", focus: "harness" };
@@ -469,6 +298,7 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
 
     const failing = checks.filter((check) => !check.passed);
     const failingDetail = failing.map((check) => `${check.name}: ${check.detail}`).join(" ");
+    verifierFailure = failingDetail;
     yield timeline(
       "verify-fail",
       "Verifier failed",
@@ -487,6 +317,56 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
     yield* beat();
   }
 
+  async function* applyProposed(action: ProposedAction, attempt: number): AsyncGenerator<HarnessEvent> {
+    const workspaceAction =
+      action.type === "delete"
+        ? { type: "delete" as const, path: action.path }
+        : { type: "write" as const, path: action.path, contents: action.contents };
+    const decision = workspace.decide(workspaceAction);
+    const copy = actionCopy(action, attempt);
+    const diff = action.type === "write" ? await writeDiff(workspace, action.path, action.contents) : "";
+    if (decision === "deny") {
+      blocked.push({ file: action.path, policy: policyField(action), reason: copy.blockReason });
+      yield timeline(
+        "policy-block",
+        copy.blockTitle,
+        diff ? `${copy.blockDetail}\n${diff}`.trim() : copy.blockDetail,
+      );
+      return;
+    }
+    let grant: { approved: true } | undefined;
+    if (decision === "ask") {
+      const answer = yield* askForApproval({
+        id: copy.approvalId,
+        title: copy.approvalTitle,
+        detail: copy.approvalDetail,
+      });
+      approvals.push({ action: copy.approvalAction, decision: answer });
+      if (answer !== "allow") {
+        yield timeline("approval", copy.deniedTitle, copy.deniedDetail);
+        return;
+      }
+      grant = { approved: true };
+    }
+    if (action.type === "delete") {
+      const removed = await workspace.delete(action.path, grant);
+      if (removed.ok && removed.value.deleted) {
+        filesChanged.add(action.path);
+        files = await readProject(workspace);
+        yield { type: "files", files: cloneFiles(files) };
+        yield timeline("edit", copy.editTitle, decision === "ask" ? copy.approvedDetail : copy.editDetail);
+      }
+      return;
+    }
+    const written = await workspace.write(action.path, action.contents, grant);
+    if (!written.ok || !written.value.changed) return;
+    filesChanged.add(action.path);
+    files = await readProject(workspace);
+    yield { type: "files", files: cloneFiles(files) };
+    const detail = decision === "ask" ? copy.approvedDetail : copy.editDetail;
+    yield timeline("edit", copy.editTitle, action.path.endsWith(".test.ts") && diff ? `${detail}\n${diff}`.trim() : detail);
+  }
+
   async function* askForApproval(
     request: ApprovalRequest,
   ): AsyncGenerator<HarnessEvent, "allow" | "deny"> {
@@ -502,6 +382,170 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
   }
 }
 
+async function workspaceSnapshot(workspace: Workspace): Promise<{ path: string; contents: string }[]> {
+  const status = await workspace.status();
+  if (!status.ok) throw new Error("The workspace refused to report status.");
+  const files: { path: string; contents: string }[] = [];
+  for (const file of status.value.files) {
+    if (file.state === "deleted") continue;
+    const read = await workspace.read(file.path);
+    if (read.ok) files.push({ path: file.path, contents: read.value });
+  }
+  return files;
+}
+
+function orderedSnapshot(files: { path: string; contents: string }[]): { path: string; contents: string }[] {
+  const preferred = ["validator.ts", "signup.test.ts", "legacy-helper.ts"];
+  return [...files].sort((left, right) => {
+    const leftIndex = preferred.indexOf(left.path);
+    const rightIndex = preferred.indexOf(right.path);
+    if (leftIndex === -1 && rightIndex === -1) return left.path.localeCompare(right.path);
+    if (leftIndex === -1) return 1;
+    if (rightIndex === -1) return -1;
+    return leftIndex - rightIndex;
+  });
+}
+
+function readDetail(path: string): string {
+  if (path === "validator.ts") {
+    return "Signup checker source, read through the workspace. The password rule is what the failing check is about.";
+  }
+  if (path === "signup.test.ts") {
+    return "Three checks: username, password, and email. The harness may not rewrite these when modifyTests is deny.";
+  }
+  if (path === "legacy-helper.ts") {
+    return "A stale draft, read through the workspace. The signup tests do not import it.";
+  }
+  return "Read through the workspace.";
+}
+
+async function writeDiff(workspace: Workspace, path: string, contents: string): Promise<string> {
+  const current = await workspace.read(path).catch(() => null);
+  if (!current || !current.ok) return "";
+  return unifiedDiff(path, current.value, contents);
+}
+
+function policyField(action: ProposedAction): "modifyTests" | "delete" | "editSource" {
+  if (action.type === "delete") return "delete";
+  if (/(^|\/)[^/]+\.(test|spec)\.[cm]?[jt]sx?$/.test(action.path) || action.path.includes("__tests__/")) {
+    return "modifyTests";
+  }
+  return "editSource";
+}
+
+function actionCopy(action: ProposedAction, attempt: number): {
+  blockTitle: string;
+  blockDetail: string;
+  blockReason: string;
+  approvalId: string;
+  approvalTitle: string;
+  approvalDetail: string;
+  approvalAction: string;
+  deniedTitle: string;
+  deniedDetail: string;
+  editTitle: string;
+  editDetail: string;
+  approvedDetail: string;
+} {
+  if (action.type === "delete") {
+    return {
+      blockTitle: `Blocked delete of ${action.path}`,
+      blockDetail: "delete is deny. The file stays on disk in this workspace, and the loop continues.",
+      blockReason: "The agent proposed deleting the stale helper.",
+      approvalId: "delete-helper",
+      approvalTitle: `Delete ${action.path}?`,
+      approvalDetail:
+        "The agent wants to delete a stale helper that nothing imports. The contract says delete requires approval. Deny leaves the file in place and the loop continues. Allow once removes only that file.",
+      approvalAction: `delete ${action.path}`,
+      deniedTitle: "Delete denied",
+      deniedDetail: `${action.path} stays. The harness did not remove it, and the loop continues.`,
+      editTitle: `Deleted ${action.path}`,
+      editDetail: "delete is allow, so the harness removed the stale helper without stopping for approval.",
+      approvedDetail: "You allowed the delete once. The signup tests do not import that file, so the checker still runs.",
+    };
+  }
+  const partial = action.contents.includes("password.length >= 8") && !action.contents.includes("hasNumber");
+  const full = action.contents.includes("const hasNumber");
+  if (action.path === "signup.test.ts") {
+    return {
+      blockTitle: "Blocked edit to signup.test.ts",
+      blockDetail: "modifyTests is deny, so the test file was not written.",
+      blockReason: "The agent proposed weakening the password assertion.",
+      approvalId: "modify-tests",
+      approvalTitle: "Allow a change to signup.test.ts?",
+      approvalDetail:
+        "The agent wants to flip the longpassword assertion so a weak password rule would pass. modifyTests is require approval.",
+      approvalAction: "modify signup.test.ts",
+      deniedTitle: "Test edit denied",
+      deniedDetail: "signup.test.ts stays as written. The loop continues.",
+      editTitle: "Edited signup.test.ts",
+      editDetail: "modifyTests is allow, so the harness applied the agent's test edit.",
+      approvedDetail: "You allowed the test change once. The verifier will run the edited checks.",
+    };
+  }
+  if (action.path === "validator.ts" && (partial || full)) {
+    return {
+      blockTitle: "Blocked edit to validator.ts",
+      blockDetail: "editSource is deny. The checker source was not modified.",
+      blockReason: partial
+        ? "The agent proposed raising the password length without requiring a number."
+        : "The agent proposed the full password rule.",
+      approvalId: `edit-source-${attempt}`,
+      approvalTitle: partial ? "Allow a partial password edit?" : "Allow the password fix?",
+      approvalDetail: partial
+        ? "The agent wants to change the password rule to length >= 8 and stop there. editSource is require approval."
+        : "The agent wants to require 8 characters, a letter, and a number. editSource is require approval.",
+      approvalAction: partial ? "partial edit validator.ts" : "fix validator.ts",
+      deniedTitle: "Source edit denied",
+      deniedDetail: "validator.ts stays as it is. The loop continues to the verifier.",
+      editTitle: "Edited validator.ts",
+      editDetail: partial
+        ? "Raised the password length to 8. A letter and a number are still not required, so this attempt is incomplete on purpose."
+        : "Password rule now requires 8 characters, a letter, and a number.",
+      approvedDetail: partial
+        ? "Raised the password length to 8. A letter and a number are still not required."
+        : "Password rule now requires 8 characters, a letter, and a number.",
+    };
+  }
+  const field = policyField(action);
+  return {
+    blockTitle: `Blocked edit to ${action.path}`,
+    blockDetail: `${field} is deny, so ${action.path} was not written.`,
+    blockReason: `The agent proposed a write to ${action.path}.`,
+    approvalId: `edit-${action.path}-${attempt}`,
+    approvalTitle: `Allow a change to ${action.path}?`,
+    approvalDetail: `The agent wants to write ${action.path}. ${field} is require approval.`,
+    approvalAction: `modify ${action.path}`,
+    deniedTitle: "Edit denied",
+    deniedDetail: `${action.path} stays as it is. The loop continues.`,
+    editTitle: `Edited ${action.path}`,
+    editDetail: `${field} is allow, so the harness wrote ${action.path}.`,
+    approvedDetail: `You allowed the write to ${action.path} once.`,
+  };
+}
+
+async function readProject(workspace: Workspace): Promise<ProjectFiles> {
+  const validator = await workspace.read("validator.ts");
+  const tests = await workspace.read("signup.test.ts");
+  if (!validator.ok || !tests.ok) {
+    throw new Error("The workspace refused to read the signup fixture.");
+  }
+  const helper = await workspace.read("legacy-helper.ts").catch(() => null);
+  return {
+    validator: validator.value,
+    tests: tests.value,
+    helper: helper && helper.ok ? helper.value : null,
+  };
+}
+
+function verifyThroughWorkspace(
+  workspace: Workspace,
+  contract: LoopContract,
+  signup: (files: { validator: string; tests: string }) => Promise<VerifyResponse>,
+): Promise<VerifierReport> {
+  return verifyWithWorkspace(workspace, contract.verifier.commands, signup);
+}
+
 function checksFromReport(report: VerifierReport): CheckResult[] {
   if (report.checks) return report.checks;
   return report.commands.map((entry) => ({
@@ -514,12 +558,6 @@ function checksFromReport(report: VerifierReport): CheckResult[] {
         ? "Exited 0."
         : `Exited ${entry.exitCode}.${entry.stderr ? ` ${entry.stderr}` : ""}`,
   }));
-}
-
-function enforcePolicy(policy: Policy): "apply" | "block" | "ask" {
-  if (policy === "allow") return "apply";
-  if (policy === "deny") return "block";
-  return "ask";
 }
 
 function cloneFiles(files: ProjectFiles): ProjectFiles {

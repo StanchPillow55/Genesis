@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start -H 0.0.0.0 -p 38471",
     "lint": "eslint",
-    "test": "tsx --test src/lib/proofloop.test.ts"
+    "test": "tsx --test src/lib/*.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
