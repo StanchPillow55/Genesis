@@ -34,6 +34,32 @@ export type LoopContract = {
   uncertainty: string | null;
 };
 
+export type ContractAmendment = {
+  type: "add-verifier-command";
+  command: string;
+};
+
+/** Human-approved contract update. This does not execute the command. */
+export function applyAmendment(contract: LoopContract, amendment: ContractAmendment): LoopContract {
+  const command = amendment.command.trim();
+  if (!command) {
+    throw new Error("A contract amendment needs a command.");
+  }
+  if (amendment.type !== "add-verifier-command") {
+    throw new Error("The only contract amendment is adding a verifier command.");
+  }
+  const exists = contract.verifier.commands.some(
+    (entry) => entry.type === "shell" && entry.command === command,
+  );
+  if (exists) return contract;
+  return {
+    ...contract,
+    verifier: {
+      commands: [...contract.verifier.commands, { type: "shell", command }],
+    },
+  };
+}
+
 export function verifierCommandName(command: VerifierCommand): string {
   return command.type === "fixture" ? command.id : command.command;
 }

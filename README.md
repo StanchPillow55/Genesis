@@ -27,6 +27,8 @@ npx proofloop ui --root /path/to/project
 
 A project run checks out a detached git worktree at the current revision. The original working tree stays untouched. Accept defaults to a `proofloop/<short>-<slug>` branch. `apply-uncommitted` copies the diff back without committing. Discard removes the worktree. A directory that is not a git repo uses a temporary copy with the same two outcomes. In-place execution is not available.
 
+Verifier commands come from the contract and run through one shell choke point. A command that is not named becomes a contract amendment. Approving that amendment updates the contract and does not run the command. A one-time approval cannot execute it. The signup fixture remains the preset when the goal names no shell command.
+
 Optional model key, in `.env.local` (gitignored, never commit it):
 
 ```bash

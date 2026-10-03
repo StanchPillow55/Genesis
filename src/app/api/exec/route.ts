@@ -48,6 +48,15 @@ export async function POST(request: Request) {
   });
   const result = await workspace.exec(record.command.trim());
   if (!result.ok) {
+    if (result.decision === "amend" && result.amendment) {
+      return Response.json(
+        {
+          error: "That command is not in the contract. Update the contract before it can run.",
+          amendment: result.amendment,
+        },
+        { status: 409 },
+      );
+    }
     return Response.json(
       { error: `Policy returned ${result.decision} before the command ran.` },
       { status: 403 },

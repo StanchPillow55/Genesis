@@ -4,7 +4,8 @@ import { normalizeWorkspacePath } from "./workspace";
 
 export type ProposedAction =
   | { type: "write"; path: string; contents: string }
-  | { type: "delete"; path: string };
+  | { type: "delete"; path: string }
+  | { type: "amendment"; command: string };
 
 export type ProposedStep = {
   rationale: string;
@@ -88,6 +89,12 @@ export function parseJsonObject(text: string): unknown {
 
 function parseAction(value: unknown): ProposedAction {
   const record = objectRecord(value, "Each action must write a file or delete a file.");
+  if (record.type === "exec" || record.type === "shell" || record.type === "amendment") {
+    if (typeof record.command !== "string" || !record.command.trim()) {
+      throw new Error("A proposed command needs a command string. It is not executed until the contract names it.");
+    }
+    return { type: "amendment", command: record.command.trim() };
+  }
   if (record.type === "delete" && typeof record.path === "string") {
     return { type: "delete", path: normalizeWorkspacePath(record.path) };
   }
