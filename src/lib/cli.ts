@@ -1,11 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { createLaunchToken } from "./api-guard";
+import { initProject } from "./project-config";
 import { canonicalizeRoot, createProjectId, SessionError } from "./session";
 
 export type ParsedCli =
   | { command: "open"; root: string }
   | { command: "ui"; root: string }
+  | { command: "init"; root: string }
   | { command: "help" };
 
 export type ServerLaunch = {
@@ -23,6 +25,10 @@ const HELP = `proofloop open <dir>
 
 proofloop ui --root <dir>
   Same local server, without assuming the shell's current directory.
+
+proofloop init [dir]
+  Write proofloop.yaml. Suggestions come from package.json or Python metadata.
+  Runtime reads that file and does not detect commands on its own.
 `;
 
 export function parseCliArgs(argv: string[]): ParsedCli {
@@ -36,6 +42,10 @@ export function parseCliArgs(argv: string[]): ParsedCli {
       throw new SessionError("proofloop open needs a directory. Example: proofloop open .");
     }
     return { command: "open", root };
+  }
+  if (command === "init") {
+    const root = rest[0] && !rest[0].startsWith("-") ? rest[0] : ".";
+    return { command: "init", root };
   }
   if (command === "ui") {
     const index = rest.indexOf("--root");
@@ -125,6 +135,18 @@ export async function main(argv: string[], io?: Partial<CliIo>): Promise<number>
   if (parsed.command === "help") {
     runtime.stdout(HELP.trimEnd());
     return 0;
+  }
+  if (parsed.command === "init") {
+    try {
+      const root = canonicalizeRoot(parsed.root);
+      const wrote = initProject(root);
+      runtime.stdout(`Wrote ${wrote.file}`);
+      for (const reason of wrote.reasons) runtime.stdout(reason);
+      return 0;
+    } catch (error) {
+      runtime.stderr(error instanceof Error ? error.message : String(error));
+      return 1;
+    }
   }
   let launch: ServerLaunch;
   try {
