@@ -1,3 +1,4 @@
+import { authorizeRequest, projectIdFrom } from "@/lib/api-guard";
 import { parseVerifier } from "@/lib/contract";
 import { policyFromContract } from "@/lib/workspace";
 import { createFsWorkspace } from "@/lib/workspace-fs";
@@ -10,6 +11,10 @@ export async function POST(request: Request) {
     body = await request.json();
   } catch {
     return Response.json({ error: "The workspace expected JSON." }, { status: 400 });
+  }
+  const auth = authorizeRequest(request, projectIdFrom(request, body));
+  if (!auth.ok) {
+    return Response.json({ error: auth.error }, { status: auth.status });
   }
   if (!body || typeof body !== "object") {
     return Response.json({ error: "The workspace expected a command." }, { status: 400 });
@@ -31,7 +36,7 @@ export async function POST(request: Request) {
   }
 
   const workspace = createFsWorkspace({
-    root: process.cwd(),
+    root: auth.session.root,
     policy: policyFromContract({
       goal: "run verifier",
       maxAttempts: 1,

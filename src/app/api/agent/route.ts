@@ -1,3 +1,4 @@
+import { authorizeRequest, projectIdFrom } from "@/lib/api-guard";
 import { parseAgentContext } from "@/lib/agent";
 import { createGeminiAgentBackend } from "@/lib/gemini-agent";
 
@@ -9,6 +10,10 @@ export async function POST(request: Request) {
     body = await request.json();
   } catch {
     return Response.json({ error: "The agent expected JSON." }, { status: 400 });
+  }
+  const auth = authorizeRequest(request, projectIdFrom(request, body));
+  if (!auth.ok) {
+    return Response.json({ error: auth.error }, { status: auth.status });
   }
 
   let context;

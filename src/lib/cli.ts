@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import path from "node:path";
+import { createLaunchToken } from "./api-guard";
 import { canonicalizeRoot, createProjectId, SessionError } from "./session";
 
 export type ParsedCli =
@@ -53,12 +54,17 @@ export function buildServerLaunch(options: {
   projectId?: string;
   port?: number;
   host?: string;
+  token?: string;
   env?: NodeJS.ProcessEnv;
 }): ServerLaunch {
   const root = canonicalizeRoot(options.root);
   const projectId = options.projectId ?? createProjectId();
   const port = options.port ?? 38471;
   const host = options.host ?? "127.0.0.1";
+  if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+    throw new SessionError("The local server only binds to loopback.");
+  }
+  const token = options.token ?? (options.env?.PROOFLOOP_TOKEN?.trim() || createLaunchToken());
   const nextBin = path.join(options.packageRoot, "node_modules", "next", "dist", "bin", "next");
   const env: NodeJS.ProcessEnv = {
     ...(options.env ?? process.env),
@@ -66,6 +72,7 @@ export function buildServerLaunch(options: {
     PROOFLOOP_PROJECT_ID: projectId,
     PROOFLOOP_PORT: String(port),
     PROOFLOOP_HOST: host,
+    PROOFLOOP_TOKEN: token,
   };
   return {
     command: process.execPath,

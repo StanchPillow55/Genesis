@@ -1,4 +1,5 @@
 import { ProofLoopApp } from "@/components/proof-loop-app";
+import { launchToken } from "@/lib/api-guard";
 import { geminiCredentials } from "@/lib/gemini";
 import { loadSeedProject } from "@/lib/sample-project";
 import { launchPublicSession } from "@/lib/session-store";
@@ -12,6 +13,7 @@ export default function HomePage() {
       seed={loadSeedProject()}
       geminiConfigured={geminiCredentials() !== null}
       session={session}
+      token={launchToken()}
     />
   );
 }
