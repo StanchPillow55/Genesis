@@ -1,4 +1,5 @@
 import type { ContractAmendment, LoopContract, Policy } from "./contract";
+import { anyGlobMatches } from "./globs";
 import type { CommandResult } from "./verifier";
 
 export type PolicyDecision = "allow" | "deny" | "ask" | "amend";
@@ -86,6 +87,15 @@ export function policyFromContract(contract: LoopContract): PolicyEngine {
           (command) => command.type === "shell" && command.command === action.command,
         );
         return named ? "allow" : "amend";
+      }
+      if (action.type === "write" || action.type === "delete") {
+        if (
+          contract.writeGlobs &&
+          contract.writeGlobs.length > 0 &&
+          !anyGlobMatches(contract.writeGlobs, action.path)
+        ) {
+          return "deny";
+        }
       }
       if (action.type === "delete") return decisionFor(contract.policies.delete);
       if (action.type === "write") {

@@ -31,6 +31,8 @@ npx proofloop init .
 
 `proofloop.yaml` names the agent provider, verifier commands, write globs, delete policy, attempt limit, and accept strategy (`branch` or `apply-uncommitted`). Init may suggest `npm test` from package.json or `pytest` from Python metadata. Invalid config is rejected with the field name.
 
+Compiling a project goal uses that file for the verifier, write policy, and attempt limit. Gemini, when a key is set, only turns the sentence into the goal and uncertainty. A command the model infers does not replace the config. The sample session still compiles to the signup fixture. An unclear sentence still sets uncertainty.
+
 `open` and `ui` canonicalize the directory, register a `ProjectSession`, start the server on `127.0.0.1`, and open the browser. Each launch creates a token and injects it into the page. `/api/agent`, `/api/verify`, `/api/exec`, and `/api/session` reject a missing token with 401 and a bad origin or unknown project id with 403. Those routes resolve the directory from the project id. A path in the request body is ignored. The sample signup project stays available as its own session.
 
 A project run checks out a detached git worktree at the current revision. The original working tree stays untouched. Accept defaults to a `proofloop/<short>-<slug>` branch. `apply-uncommitted` copies the diff back without committing. Discard removes the worktree. A directory that is not a git repo uses a temporary copy with the same two outcomes. In-place execution is not available.

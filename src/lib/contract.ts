@@ -32,6 +32,10 @@ export type LoopContract = {
   };
   verifier: VerifierSpec;
   uncertainty: string | null;
+  /** Present when a project config limits writes. Omitted for the sample preset. */
+  writeGlobs?: string[];
+  /** Present when a project config chooses how accept works. */
+  acceptStrategy?: "branch" | "apply-uncommitted";
 };
 
 export type ContractAmendment = {
@@ -172,6 +176,8 @@ export function parseContract(input: unknown): LoopContract {
   if (!goal && !uncertainty) {
     throw new Error("The contract has no goal. Say what done means, or set uncertainty so the harness asks.");
   }
+  const writeGlobs = parseWriteGlobs(raw.writeGlobs);
+  const acceptStrategy = parseAcceptStrategy(raw.acceptStrategy);
   return {
     goal,
     maxAttempts,
@@ -182,6 +188,8 @@ export function parseContract(input: unknown): LoopContract {
     },
     verifier,
     uncertainty,
+    ...(writeGlobs ? { writeGlobs } : {}),
+    ...(acceptStrategy ? { acceptStrategy } : {}),
   };
 }
 
@@ -361,6 +369,25 @@ function commandsFromVerifierText(value: string): VerifierCommand[] {
     return extracted.map((command) => ({ type: "shell", command }));
   }
   return [{ type: "shell", command: trimmed }];
+}
+
+function parseWriteGlobs(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new Error("writeGlobs must be a list of glob strings.");
+  }
+  return value.map((entry) => {
+    if (typeof entry !== "string" || !entry.trim()) {
+      throw new Error("writeGlobs must be a list of glob strings.");
+    }
+    return entry.trim();
+  });
+}
+
+function parseAcceptStrategy(value: unknown): "branch" | "apply-uncommitted" | undefined {
+  if (value === undefined) return undefined;
+  if (value === "branch" || value === "apply-uncommitted") return value;
+  throw new Error("acceptStrategy must be branch or apply-uncommitted.");
 }
 
 function parsePolicy(value: unknown, field: string): Policy {
