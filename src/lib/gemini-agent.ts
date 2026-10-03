@@ -6,13 +6,18 @@ const SYSTEM = `You are a coding agent inside ProofLoop. You propose one workspa
 Return ONLY JSON:
 {
   "rationale": string,
+  "summary": string,
+  "filesTouched": string[],
+  "unresolved": string | null,
   "actions": [
     { "type": "write", "path": "relative/path", "contents": "full new file contents" },
     { "type": "delete", "path": "relative/path" }
   ]
 }
 Rules:
+- summary is one or two sentences of what this step did. filesTouched lists the paths you changed. unresolved is what is still failing, or null.
 - actions may only write a whole file or delete a file. No shell commands.
+- Do not paste raw command logs into the summary.
 - paths stay inside the workspace. No absolute paths and no "..".
 - Prefer the smallest change that could make the verifier commands exit 0.
 - Do not claim the task is finished.

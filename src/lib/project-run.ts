@@ -2,6 +2,19 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import type { AgentBackend, ProposedAction } from "./agent";
 import { selectContext } from "./context-select";
+import {
+  attachProof,
+  buildContextPack,
+  createRunState,
+  markPhase,
+  publicRunState,
+  recordChanges,
+  recordPolicy,
+  recordVerifier,
+  recordWorkerSummary,
+  type PublicRunState,
+  type RunState,
+} from "./run-state";
 import { applyAmendment, formatVerifier, type LoopContract } from "./contract";
 import {
   proofAllowsDone,
@@ -39,6 +52,7 @@ export type RunView = {
   policyDecisions: PolicyDecisionRecord[];
   proof: Proof | null;
   error: string | null;
+  structured: PublicRunState | null;
 };
 
 export function emptyRunView(contract: LoopContract): RunView {
@@ -56,6 +70,7 @@ export function emptyRunView(contract: LoopContract): RunView {
     policyDecisions: [],
     proof: null,
     error: null,
+    structured: null,
   };
 }
 
@@ -78,10 +93,17 @@ export async function runProjectLoop(options: {
 }): Promise<RunView> {
   const { workspace, contract, backend, signal, shouldPause, waitResume, waitApproval, onUpdate } = options;
   const view = emptyRunView(contract);
+  const at = () => new Date().toISOString();
+  let state: RunState = createRunState(contract, at(), [
+    `modifyTests=${contract.policies.modifyTests}`,
+    `delete=${contract.policies.delete}`,
+    `editSource=${contract.policies.editSource}`,
+  ]);
   const blocked: PolicyBlock[] = [];
   const filesChanged = new Set<string>();
   let verifierFailure: string | null = null;
   view.status = "running";
+  view.structured = publicRunState(state);
   publish();
 
   for (let attempt = 1; attempt <= contract.maxAttempts; attempt += 1) {
@@ -95,17 +117,21 @@ export async function runProjectLoop(options: {
     if (commandsPassed(before) && filesChanged.size > 0) {
       return finishProof(attempt, before);
     }
-    verifierFailure = failureText(checksFromReport(before));
+    verifierFailure = state.failures.at(-1)?.value ?? failureText(checksFromReport(before));
     view.checks = checksFromReport(before);
+    state = markPhase(state, "use");
+    view.structured = publicRunState(state);
     publish();
 
     const listed = options.listFiles ? await options.listFiles() : await filesFromWorkspace(workspace);
-    const files = selectContext({
+    const selected = selectContext({
       goal: contract.goal,
       verifierOutput: verifierFailure ?? "",
       changedPaths: [...filesChanged],
       files: listed,
     });
+    const pack = buildContextPack(state, selected, 8_000);
+    const files = pack.sourceFiles;
     let proposal;
     try {
       proposal = await backend.proposeStep({
@@ -113,7 +139,7 @@ export async function runProjectLoop(options: {
         attempt,
         maxAttempts: contract.maxAttempts,
         files,
-        verifierFailure,
+        verifierFailure: pack.currentFailure,
         contract,
       });
     } catch (error) {
@@ -124,6 +150,8 @@ export async function runProjectLoop(options: {
       return view;
     }
     view.agent = { name: backend.name, rationale: proposal.rationale };
+    state = recordWorkerSummary(state, proposal.result?.summary ?? proposal.rationale, at());
+    view.structured = publicRunState(state);
     publish();
 
     for (const action of proposal.actions) {
@@ -159,6 +187,17 @@ export async function runProjectLoop(options: {
       const report = await verifyWithWorkspace(workspace, contract.verifier.commands, verifySignup);
       view.checks = checksFromReport(report);
       await refreshDiff();
+      const raw = report.commands
+        .map((entry) => `${entry.command}\n${entry.stdout}\n${entry.stderr}`)
+        .join("\n");
+      state = recordVerifier(
+        state,
+        report.commands.map((entry) => ({ command: entry.command, exitCode: entry.exitCode })),
+        raw,
+        at(),
+      );
+      state = recordChanges(state, view.changedFiles, at());
+      view.structured = publicRunState(state);
       if (report.crash) {
         view.error = report.crash;
         view.status = "stopped";
@@ -206,12 +245,17 @@ export async function runProjectLoop(options: {
       view.status = "stopped";
       view.stopReason = "crash";
       view.proof = null;
+      view.structured = publicRunState(state);
       publish();
       return view;
     }
+    state = attachProof(state, `proof-${attempt}`, at());
+    state = markPhase(state, "fold");
+    state = markPhase(state, "discard");
     view.proof = proof;
     view.status = "proved";
     view.stopReason = null;
+    view.structured = publicRunState(state);
     publish();
     return view;
   }
@@ -263,11 +307,14 @@ export async function runProjectLoop(options: {
         policy: action.type === "delete" ? "delete" : isTestPath(action.path) ? "modifyTests" : "editSource",
         reason: `${action.type} ${action.path} was denied.`,
       });
-      view.policyDecisions.push({
+      const denied = {
         action: `${action.type} ${action.path}`,
-        decision: "deny",
+        decision: "deny" as const,
         detail: "The contract denied this edit. The file was not changed.",
-      });
+      };
+      view.policyDecisions.push(denied);
+      state = recordPolicy(state, denied, at());
+      view.structured = publicRunState(state);
       publish();
       return;
     }
@@ -385,6 +432,7 @@ function cloneView(view: RunView): RunView {
     changedFiles: view.changedFiles.map((entry) => ({ ...entry })),
     checks: view.checks.map((entry) => ({ ...entry })),
     policyDecisions: view.policyDecisions.map((entry) => ({ ...entry })),
+    structured: view.structured ? { ...view.structured, summaries: [...view.structured.summaries], constraints: [...view.structured.constraints] } : null,
     proof: view.proof
       ? {
           ...view.proof,

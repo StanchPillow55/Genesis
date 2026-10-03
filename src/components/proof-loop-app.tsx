@@ -113,6 +113,14 @@ export function ProofLoopApp({
   const [remoteAgent, setRemoteAgent] = useState<{ name: string; rationale: string } | null>(null);
   const [remoteApprovals, setRemoteApprovals] = useState<{ action: string; decision: "allow" | "deny" }[]>([]);
   const [remotePolicy, setRemotePolicy] = useState<{ action: string; decision: string; detail: string }[]>([]);
+  const [structured, setStructured] = useState<{
+    phase: string;
+    goal: string;
+    failure: string | null;
+    summaries: string[];
+    proofArtifact: string | null;
+    constraints: string[];
+  } | null>(null);
   const [acceptedBranch, setAcceptedBranch] = useState<string | null>(null);
   const [discarded, setDiscarded] = useState(false);
 
@@ -171,6 +179,14 @@ export function ProofLoopApp({
             policyDecisions: { action: string; decision: string; detail: string }[];
             proof: Proof | null;
             error: string | null;
+            structured: {
+              phase: string;
+              goal: string;
+              failure: string | null;
+              summaries: string[];
+              proofArtifact: string | null;
+              constraints: string[];
+            } | null;
           };
           accepted: { branch: string | null } | null;
           discarded: boolean;
@@ -189,6 +205,7 @@ export function ProofLoopApp({
         setRemotePolicy(view.policyDecisions);
         setProof(view.proof);
         setError(view.error);
+        setStructured(view.structured);
         setAcceptedBranch(data.accepted?.branch ?? null);
         setDiscarded(data.discarded);
         setChecks(
@@ -887,6 +904,7 @@ export function ProofLoopApp({
             checks={checks}
             policyDecisions={surfacePolicy}
             proof={proof}
+            structured={session.kind === "project" ? structured : null}
             sessionKind={session.kind}
             acceptedBranch={acceptedBranch}
             discarded={discarded}

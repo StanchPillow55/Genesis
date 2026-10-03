@@ -28,6 +28,7 @@ export function RunSurface({
   checks,
   policyDecisions,
   proof,
+  structured,
   sessionKind,
   acceptedBranch,
   discarded,
@@ -45,6 +46,14 @@ export function RunSurface({
   checks: CheckView[];
   policyDecisions: PolicyRow[];
   proof: Proof | null;
+  structured: {
+    phase: string;
+    goal: string;
+    failure: string | null;
+    summaries: string[];
+    proofArtifact: string | null;
+    constraints: string[];
+  } | null;
   sessionKind: "sample" | "project";
   acceptedBranch: string | null;
   discarded: boolean;
@@ -169,6 +178,26 @@ export function RunSurface({
           )}
         </CardContent>
       </Card>
+
+      {structured ? (
+        <Card>
+          <CardHeader>
+            <CardTitle>Run state</CardTitle>
+            <CardDescription>
+              Phase {structured.phase}. Agents share this record, not a transcript. Raw verifier logs are not part of it.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm">
+            <p>{structured.goal}</p>
+            <p className="text-muted-foreground">{structured.constraints.join(" · ")}</p>
+            {structured.failure ? <p>Failure: {structured.failure}</p> : null}
+            {structured.summaries.map((summary) => (
+              <p key={summary}>{summary}</p>
+            ))}
+            {structured.proofArtifact ? <p>Proof artifact {structured.proofArtifact}</p> : null}
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader>
