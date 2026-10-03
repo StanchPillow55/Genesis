@@ -13,7 +13,17 @@ npm install
 npm run dev
 ```
 
-Open [http://127.0.0.1:38471](http://127.0.0.1:38471).
+Open [http://127.0.0.1:38471](http://127.0.0.1:38471). That server uses the built-in sample session. The page receives an opaque project id. It does not receive a filesystem path.
+
+Point the local server at another directory:
+
+```bash
+npx proofloop open .
+# or
+npx proofloop ui --root /path/to/project
+```
+
+`open` and `ui` canonicalize the directory, register a `ProjectSession`, start the server, and open the browser. The sample signup project stays available as its own session.
 
 Optional model key, in `.env.local` (gitignored, never commit it):
 

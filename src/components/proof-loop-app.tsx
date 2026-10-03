@@ -30,6 +30,7 @@ import {
   type TimelineEvent,
 } from "@/lib/harness";
 import type { SeedProject } from "@/lib/sample-project";
+import type { PublicSession } from "@/lib/session";
 import type { CommandResult, VerifyResponse } from "@/lib/verifier";
 import { cn } from "@/lib/utils";
 
@@ -74,9 +75,11 @@ const STATUS_LABEL: Record<RunStatus, string> = {
 export function ProofLoopApp({
   seed,
   geminiConfigured,
+  session,
 }: {
   seed: SeedProject;
   geminiConfigured: boolean;
+  session: PublicSession;
 }) {
   const seedFiles = useMemo<ProjectFiles>(
     () => ({ validator: seed.validator, tests: seed.tests, helper: seed.helper }),
@@ -457,6 +460,9 @@ export function ProofLoopApp({
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <StatusPill status={status} />
+            <Badge variant="outline">
+              {session.kind === "sample" ? "Sample session" : "Project session"} {session.projectId}
+            </Badge>
             <Badge variant="outline">
               {compilerMode === "gemini"
                 ? compilerModel ?? "Model"
