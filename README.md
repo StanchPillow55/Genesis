@@ -25,6 +25,8 @@ npx proofloop ui --root /path/to/project
 
 `open` and `ui` canonicalize the directory, register a `ProjectSession`, start the server on `127.0.0.1`, and open the browser. Each launch creates a token and injects it into the page. `/api/agent`, `/api/verify`, `/api/exec`, and `/api/session` reject a missing token with 401 and a bad origin or unknown project id with 403. Those routes resolve the directory from the project id. A path in the request body is ignored. The sample signup project stays available as its own session.
 
+A project run checks out a detached git worktree at the current revision. The original working tree stays untouched. Accept defaults to a `proofloop/<short>-<slug>` branch. `apply-uncommitted` copies the diff back without committing. Discard removes the worktree. A directory that is not a git repo uses a temporary copy with the same two outcomes. In-place execution is not available.
+
 Optional model key, in `.env.local` (gitignored, never commit it):
 
 ```bash
