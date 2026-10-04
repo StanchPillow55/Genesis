@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -39,9 +40,25 @@ export function proofloopBranchName(revision: string, slug: string): string {
   return `proofloop/${short}-${clean}`;
 }
 
+/**
+ * Resolve the source root to its real path. `git rev-parse --show-toplevel`
+ * returns a symlink-resolved path (e.g. /private/var on macOS), so without this
+ * `path.relative(top, resolved)` can mismatch and the workspace root would point
+ * back at the caller's tree instead of the isolated worktree. Falls back to a
+ * plain resolve if the path cannot be canonicalized.
+ */
+function canonicalRoot(sourceRoot: string): string {
+  const resolved = path.resolve(sourceRoot);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
 export async function createIsolation(sourceRoot: string): Promise<Isolation> {
   const id = randomBytes(8).toString("hex");
-  const resolved = path.resolve(sourceRoot);
+  const resolved = canonicalRoot(sourceRoot);
   const top = await gitOutput(["-C", resolved, "rev-parse", "--show-toplevel"]);
   if (top !== null) {
     const revision = await gitOutput(["-C", top, "rev-parse", "HEAD"]);
