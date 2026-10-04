@@ -1,3 +1,4 @@
+import { authorizeRequest, projectIdFrom } from "@/lib/api-guard";
 import { parseVerifier, type VerifierCommand } from "@/lib/contract";
 import { runShellCommand } from "@/lib/shell";
 import { verifySignup } from "@/lib/verifier";
@@ -12,6 +13,10 @@ export async function POST(request: Request) {
     body = await request.json();
   } catch {
     return Response.json({ error: "The verifier expected JSON." }, { status: 400 });
+  }
+  const auth = authorizeRequest(request, projectIdFrom(request, body));
+  if (!auth.ok) {
+    return Response.json({ error: auth.error }, { status: auth.status });
   }
 
   if (!body || typeof body !== "object") {
@@ -63,7 +68,7 @@ export async function POST(request: Request) {
       verifier: { commands },
       uncertainty: null,
     }),
-    shell: (command) => runShellCommand(command, { cwd: process.cwd(), timeoutMs: 60_000 }),
+    shell: (command) => runShellCommand(command, { cwd: auth.session.root, timeoutMs: 60_000 }),
   });
   const report = await verifyWithWorkspace(workspace, commands, verifySignup);
   return Response.json(report);

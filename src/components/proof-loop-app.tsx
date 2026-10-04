@@ -29,6 +29,7 @@ import {
   type StopReason,
   type TimelineEvent,
 } from "@/lib/harness";
+import { localApiHeaders } from "@/lib/local-api";
 import type { SeedProject } from "@/lib/sample-project";
 import type { PublicSession } from "@/lib/session";
 import type { CommandResult, VerifyResponse } from "@/lib/verifier";
@@ -76,10 +77,12 @@ export function ProofLoopApp({
   seed,
   geminiConfigured,
   session,
+  token,
 }: {
   seed: SeedProject;
   geminiConfigured: boolean;
   session: PublicSession;
+  token: string;
 }) {
   const seedFiles = useMemo<ProjectFiles>(
     () => ({ validator: seed.validator, tests: seed.tests, helper: seed.helper }),
@@ -216,8 +219,8 @@ export function ProofLoopApp({
     try {
       const response = await fetch("/api/compile", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ goal: sentence }),
+        headers: localApiHeaders(token, session.projectId),
+        body: JSON.stringify({ goal: sentence, projectId: session.projectId }),
       });
       const data = (await response.json()) as {
         error?: string;
@@ -317,8 +320,9 @@ export function ProofLoopApp({
         signup: async (current) => {
           const response = await fetch("/api/verify", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: localApiHeaders(token, session.projectId),
             body: JSON.stringify({
+              projectId: session.projectId,
               commands: [{ type: "fixture", id: "signup" }],
               validator: current.validator,
               tests: current.tests,
@@ -335,12 +339,12 @@ export function ProofLoopApp({
             crash: data.crash,
           };
         },
-        backend: geminiConfigured ? createRemoteGeminiBackend() : createSignupDouble(),
+        backend: geminiConfigured ? createRemoteGeminiBackend(token, session.projectId) : createSignupDouble(),
         shell: async (command) => {
           const response = await fetch("/api/exec", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ command, verifier: contract.verifier }),
+            headers: localApiHeaders(token, session.projectId),
+            body: JSON.stringify({ projectId: session.projectId, command, verifier: contract.verifier }),
           });
           const data = (await response.json()) as { error?: string; result?: CommandResult };
           if (!response.ok || !data.result) {

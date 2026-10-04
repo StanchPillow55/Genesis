@@ -30,6 +30,18 @@ test("the launch plan canonicalizes the root and keeps it off the url", () => {
   assert.equal(launch.env.PROOFLOOP_PROJECT_ID, "prj_fixed");
   assert.equal(launch.url, "http://127.0.0.1:38471");
   assert.equal(launch.url.includes(root), false);
+  const token = launch.env.PROOFLOOP_TOKEN ?? "";
+  assert.ok(token.length >= 32);
+  assert.equal(launch.url.includes(token), false);
+  assert.throws(
+    () =>
+      buildServerLaunch({
+        root,
+        packageRoot: "/opt/proofloop",
+        host: "0.0.0.0",
+      }),
+    /loopback/,
+  );
   assert.deepEqual(launch.args.slice(1, 6), ["dev", "-H", "127.0.0.1", "-p", "38471"]);
   assert.equal(launch.cwd, "/opt/proofloop");
 });
@@ -55,6 +67,7 @@ test("open registers the session and opens the browser url", async () => {
   const opened: string[] = [];
   const lines: string[] = [];
   let spawnedRoot = "";
+  let launchedToken = "";
   const code = await main(["open", root], {
     packageRoot: process.cwd(),
     env: process.env,
@@ -64,6 +77,7 @@ test("open registers the session and opens the browser url", async () => {
     wait: async () => {},
     spawn: (launch) => {
       spawnedRoot = launch.env.PROOFLOOP_ROOT ?? "";
+      launchedToken = launch.env.PROOFLOOP_TOKEN ?? "";
       const child = fakeChild();
       setTimeout(() => child.emit("exit", 0), 0);
       return child;
@@ -73,6 +87,8 @@ test("open registers the session and opens the browser url", async () => {
   assert.equal(spawnedRoot, root);
   assert.deepEqual(opened, ["http://127.0.0.1:38471"]);
   assert.equal(lines.some((line) => line.includes(root)), false);
+  assert.ok(launchedToken.length >= 32);
+  assert.equal(lines.some((line) => line.includes(launchedToken)), false);
   assert.match(lines.join("\n"), /prj_/);
 });
 

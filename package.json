@@ -7,9 +7,9 @@
   },
   "scripts": {
     "proofloop": "tsx src/cli.ts",
-    "dev": "next dev -H 0.0.0.0 -p 38471",
+    "dev": "next dev -H 127.0.0.1 -p 38471",
     "build": "next build",
-    "start": "next start -H 0.0.0.0 -p 38471",
+    "start": "next start -H 127.0.0.1 -p 38471",
     "lint": "eslint",
     "test": "tsx --test src/lib/*.test.ts"
   },
