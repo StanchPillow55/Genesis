@@ -1,5 +1,5 @@
 import type { AgentBackend, ProposedAction, ProposedStep } from "./agent";
-import { formatVerifier, verifierCommandName, type LoopContract } from "./contract";
+import { applyAmendment, formatVerifier, verifierCommandName, type LoopContract } from "./contract";
 import type { CheckResult, CommandResult, VerifierReport, VerifyResponse } from "./verifier";
 import { verifyWithWorkspace } from "./verify-run";
 import { createMemoryWorkspace, policyFromContract, unifiedDiff, type Workspace } from "./workspace";
@@ -318,6 +318,31 @@ export async function* runHarness(options: HarnessOptions): AsyncGenerator<Harne
   }
 
   async function* applyProposed(action: ProposedAction, attempt: number): AsyncGenerator<HarnessEvent> {
+    if (action.type === "amendment") {
+      const answer = yield* askForApproval({
+        id: `amend-${attempt}-${action.command}`,
+        title: `Add ${action.command} to the contract?`,
+        detail:
+          "This command is not in the contract. Approving adds it to the verifier. That approval does not run the command. Deny leaves the contract unchanged.",
+      });
+      approvals.push({ action: `amend verifier ${action.command}`, decision: answer });
+      if (answer !== "allow") {
+        yield timeline(
+          "approval",
+          "Amendment denied",
+          `${action.command} stays out of the contract and did not run.`,
+        );
+        return;
+      }
+      const next = applyAmendment(contract, { type: "add-verifier-command", command: action.command });
+      contract.verifier = next.verifier;
+      yield timeline(
+        "approval",
+        "Contract amended",
+        `${action.command} is now a verifier command. The approval did not execute it.`,
+      );
+      return;
+    }
     const workspaceAction =
       action.type === "delete"
         ? { type: "delete" as const, path: action.path }

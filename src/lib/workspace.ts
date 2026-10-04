@@ -1,7 +1,7 @@
-import type { LoopContract, Policy } from "./contract";
+import type { ContractAmendment, LoopContract, Policy } from "./contract";
 import type { CommandResult } from "./verifier";
 
-export type PolicyDecision = "allow" | "deny" | "ask";
+export type PolicyDecision = "allow" | "deny" | "ask" | "amend";
 
 export type WorkspaceAction =
   | { type: "read"; path: string }
@@ -24,10 +24,13 @@ export type WorkspaceFile = {
   state: WorkspaceFileState;
 };
 
+export type { ContractAmendment } from "./contract";
+
 export type WorkspaceDenied = {
   ok: false;
-  decision: "deny" | "ask";
+  decision: "deny" | "ask" | "amend";
   action: WorkspaceAction;
+  amendment?: ContractAmendment;
 };
 
 export type WorkspaceOk<T> = {
@@ -82,7 +85,7 @@ export function policyFromContract(contract: LoopContract): PolicyEngine {
         const named = contract.verifier.commands.some(
           (command) => command.type === "shell" && command.command === action.command,
         );
-        return named ? "allow" : "deny";
+        return named ? "allow" : "amend";
       }
       if (action.type === "delete") return decisionFor(contract.policies.delete);
       if (action.type === "write") {
@@ -112,7 +115,11 @@ export function createMemoryWorkspace(options: {
     if (decision === "allow" || (decision === "ask" && grant?.approved)) {
       return { action: normalized.action };
     }
-    return { ok: false, decision, action: normalized.action };
+    const denied: WorkspaceDenied = { ok: false, decision, action: normalized.action };
+    if (decision === "amend" && normalized.action.type === "exec") {
+      denied.amendment = { type: "add-verifier-command", command: normalized.action.command };
+    }
+    return denied;
   }
 
   return {

@@ -23,9 +23,21 @@ npx proofloop open .
 npx proofloop ui --root /path/to/project
 ```
 
+Write the project config once. ProofLoop reads it on later runs and does not rediscover commands:
+
+```bash
+npx proofloop init .
+```
+
+`proofloop.yaml` names the agent provider, verifier commands, write globs, delete policy, attempt limit, and accept strategy (`branch` or `apply-uncommitted`). Init may suggest `npm test` from package.json or `pytest` from Python metadata. Invalid config is rejected with the field name.
+
 `open` and `ui` canonicalize the directory, register a `ProjectSession`, start the server on `127.0.0.1`, and open the browser. Each launch creates a token and injects it into the page. `/api/agent`, `/api/verify`, `/api/exec`, and `/api/session` reject a missing token with 401 and a bad origin or unknown project id with 403. Those routes resolve the directory from the project id. A path in the request body is ignored. The sample signup project stays available as its own session.
 
 A project run checks out a detached git worktree at the current revision. The original working tree stays untouched. Accept defaults to a `proofloop/<short>-<slug>` branch. `apply-uncommitted` copies the diff back without committing. Discard removes the worktree. A directory that is not a git repo uses a temporary copy with the same two outcomes. In-place execution is not available.
+
+Verifier commands come from the contract and run through one shell choke point. A command that is not named becomes a contract amendment. Approving that amendment updates the contract and does not run the command. A one-time approval cannot execute it. The signup fixture remains the preset when the goal names no shell command.
+
+The page is a run control surface: goal, contract, the current attempt, the agent action, approvals and amendments, the diff of changed files, verifier results, policy decisions, and proof. It does not browse the project. Pause, resume, and stop stay on the same run. Accept creates the `proofloop/` branch. Discard removes the worktree.
 
 Optional model key, in `.env.local` (gitignored, never commit it):
 

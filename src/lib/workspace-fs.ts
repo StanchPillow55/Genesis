@@ -1,6 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { runShellCommand } from "./shell";
+import { executeCommand } from "./command-choke";
 import {
   createMemoryWorkspace,
   normalizeWorkspacePath,
@@ -30,7 +30,7 @@ export function createFsWorkspace(options: {
     files: {},
     policy: options.policy,
     shell: (command) =>
-      runShellCommand(command, { cwd: root, timeoutMs: options.timeoutMs ?? 60_000 }),
+      executeCommand(command, { cwd: root, timeoutMs: options.timeoutMs ?? 60_000 }),
   });
 
   return {

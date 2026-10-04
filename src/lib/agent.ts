@@ -4,11 +4,19 @@ import { normalizeWorkspacePath } from "./workspace";
 
 export type ProposedAction =
   | { type: "write"; path: string; contents: string }
-  | { type: "delete"; path: string };
+  | { type: "delete"; path: string }
+  | { type: "amendment"; command: string };
+
+export type AgentResultArtifact = {
+  summary: string;
+  filesTouched: string[];
+  unresolved: string | null;
+};
 
 export type ProposedStep = {
   rationale: string;
   actions: ProposedAction[];
+  result?: AgentResultArtifact;
 };
 
 export type AgentFile = {
@@ -41,10 +49,21 @@ export function parseProposedStep(value: unknown): ProposedStep {
   if (record.actions.length > 20) {
     throw new Error("The agent proposed too many actions for one step.");
   }
-  return {
+  const step: ProposedStep = {
     rationale: record.rationale.trim(),
     actions: record.actions.map((action) => parseAction(action)),
   };
+  if (typeof record.summary === "string" && record.summary.trim()) {
+    const filesTouched = Array.isArray(record.filesTouched)
+      ? record.filesTouched.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    step.result = {
+      summary: record.summary.trim(),
+      filesTouched,
+      unresolved: typeof record.unresolved === "string" && record.unresolved.trim() ? record.unresolved.trim() : null,
+    };
+  }
+  return step;
 }
 
 export function parseAgentContext(value: unknown): AgentContext {
@@ -88,6 +107,12 @@ export function parseJsonObject(text: string): unknown {
 
 function parseAction(value: unknown): ProposedAction {
   const record = objectRecord(value, "Each action must write a file or delete a file.");
+  if (record.type === "exec" || record.type === "shell" || record.type === "amendment") {
+    if (typeof record.command !== "string" || !record.command.trim()) {
+      throw new Error("A proposed command needs a command string. It is not executed until the contract names it.");
+    }
+    return { type: "amendment", command: record.command.trim() };
+  }
   if (record.type === "delete" && typeof record.path === "string") {
     return { type: "delete", path: normalizeWorkspacePath(record.path) };
   }

@@ -1,6 +1,6 @@
 import { authorizeRequest, projectIdFrom } from "@/lib/api-guard";
 import { parseVerifier, type VerifierCommand } from "@/lib/contract";
-import { runShellCommand } from "@/lib/shell";
+import { executeCommand } from "@/lib/command-choke";
 import { verifySignup } from "@/lib/verifier";
 import { verifyWithWorkspace } from "@/lib/verify-run";
 import { createMemoryWorkspace, policyFromContract } from "@/lib/workspace";
@@ -68,7 +68,7 @@ export async function POST(request: Request) {
       verifier: { commands },
       uncertainty: null,
     }),
-    shell: (command) => runShellCommand(command, { cwd: auth.session.root, timeoutMs: 60_000 }),
+    shell: (command) => executeCommand(command, { cwd: auth.session.root, timeoutMs: 60_000 }),
   });
   const report = await verifyWithWorkspace(workspace, commands, verifySignup);
   return Response.json(report);
