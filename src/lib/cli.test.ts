@@ -14,6 +14,8 @@ test("open and ui parse a directory", () => {
   assert.equal(parseCliArgs(["--help"]).command, "help");
   assert.throws(() => parseCliArgs(["open"]), /needs a directory/);
   assert.throws(() => parseCliArgs(["ui"]), /--root/);
+  assert.deepEqual(parseCliArgs(["init"]), { command: "init", root: "." });
+  assert.deepEqual(parseCliArgs(["init", "apps/web"]), { command: "init", root: "apps/web" });
   assert.throws(() => parseCliArgs(["serve"]), SessionError);
 });
 
