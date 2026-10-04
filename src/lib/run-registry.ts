@@ -183,7 +183,10 @@ export async function acceptLocalRun(projectId: string, runId: string): Promise<
     throw new Error("This sample run stays in memory. There is no worktree to accept.");
   }
   if (run.accepted || run.discarded) return publicRun(run);
-  const result = await acceptIsolation(run.isolation, { strategy: "branch", slug: run.contract.goal });
+  const result = await acceptIsolation(run.isolation, {
+    strategy: run.contract.acceptStrategy ?? "branch",
+    slug: run.contract.goal,
+  });
   run.isolation = null;
   run.accepted = result;
   return publicRun(run);
